@@ -1,0 +1,11 @@
+{
+  "config": {
+    "default": true,
+    "MD013": {
+      "code_blocks": false,
+      "tables": false
+    }
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["**/node_modules"]
+}

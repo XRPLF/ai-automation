@@ -1,0 +1,50 @@
+# To run pre-commit hooks, first install pre-commit:
+# - `pip install pre-commit==${PRE_COMMIT_VERSION}`
+#
+# Then, run the following command to install the git hook scripts:
+# - `pre-commit install`
+# You can run all configured hooks against all files with:
+# - `pre-commit run --all-files`
+# To manually run a specific hook, use:
+# - `pre-commit run <hook_id> --all-files`
+# To run the hooks against only the staged files, use:
+# - `pre-commit run`
+repos:
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: b82a6c8896e491b9cb377a99ff3412131920681b # frozen: v0.23.2
+    hooks:
+      - id: markdownlint-cli2
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: 05c1426671b9237fb5e1444dd63aa5731bec0dfb # frozen: v3.13.1-1
+    hooks:
+      - id: shfmt
+        args: [--write, --indent=4, --case-indent=true]
+
+  - repo: local
+    hooks:
+      - id: shellcheck-require-variable-braces
+        name: "require ${VAR} braces around shell variables"
+        description: >-
+          shellcheck's require-variable-braces check is off by default;
+          this rewrites $VAR to ${VAR} in place, the way shfmt --write does.
+        entry: |
+          bash -c '
+            fail=0
+            for f in "$@"; do
+              d=$(shellcheck --enable=require-variable-braces --format=diff "$f")
+              if [ -n "$d" ]; then
+                printf "%s\n" "$d" | patch -p1 --no-backup-if-mismatch
+                fail=1
+              fi
+            done
+            exit "$fail"
+          ' --
+        language: python
+        additional_dependencies: [shellcheck-py==0.11.0.1]
+        types: [shell]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: a6564f5d57444e123433a5c9af733e3975c77229 # frozen: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
