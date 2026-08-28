@@ -1,0 +1,39 @@
+# .gitignore
+# cspell: disable
+
+# Macintosh Desktop Services Store files.
+.DS_Store
+
+# XCode IDE.
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+
+# JetBrains IDE.
+/.idea/
+
+# Microsoft Visual Studio IDE.
+/.vs/
+/.vscode/
+
+# zed IDE.
+/.zed/
+
+# copilot-review-bot runtime state (STATE_DIR contents), in case it is ever
+# pointed at a path inside the repo instead of its default outside it.
+/copilot-review-bot/copilot-bot-id
+/copilot-review-bot/lock
+/copilot-review-bot/requested/
+
+# AI tools.
+/.agent
+/.agents
+/.augment
+/.claude
+/CLAUDE.md
