@@ -243,7 +243,10 @@ def is_marked:
           and (.content == "THUMBS_UP" or .content == "THUMBS_DOWN" or .content == "EYES"));
 
 def unquoted:
-    (.body // "") | split("\n") | map(select(startswith(">") | not)) | join("\n");
+    # CommonMark allows up to 3 leading spaces before the ">" of a block
+    # quote (4+ makes it a code block instead), so an indented quoted
+    # mention must be dropped the same as an unindented one.
+    (.body // "") | split("\n") | map(select(test("^ {0,3}>") | not)) | join("\n");
 
 def mentions_bot:
     unquoted | test("@" + $handle + "(?![A-Za-z0-9_-])"; "i");
@@ -1166,7 +1169,7 @@ if [[ -n "${explain_file}" ]]; then
 fi
 
 check_bash_version
-require_binaries gh jq flock mktemp find sed grep tr cut
+require_binaries gh jq flock mktemp find sed grep tr cut head
 detect_date_flavour
 
 # Repos: CLI arguments, else $REPOS.

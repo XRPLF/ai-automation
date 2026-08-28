@@ -310,6 +310,16 @@ check "old mentions fall outside the lookback window" '{
   ]}
 }' 0 has_review=0
 
+# CommonMark treats up to 3 leading spaces before ">" as still a block quote,
+# so an indented quoted mention must be ignored the same as an unindented one.
+check "indented quoted mention is still ignored" '{
+  "id":"PR_17","number":17,"isDraft":false,"baseRefName":"develop","headRefOid":"c1",
+  "comments":{"nodes":[
+    {"id":"IC_8","createdAt":"2026-08-20T10:00:00Z","body":"  > @xrplf-bot go\nagreed, on it",
+     "author":{"login":"alice"},"reactionGroups":[]}
+  ]}
+}' 0 has_review=0
+
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]
