@@ -1,0 +1,25 @@
+version: 2
+
+# Only github-actions. There is no package manifest to watch: the bot is bash driven by `gh`
+# and `jq`, and the runtime image installs its dependencies with apt at build time, which
+# Dependabot cannot read. The Dockerfile's base tag floats on purpose, so every merge rebuilds
+# and picks up security updates without anything to bump here.
+#
+# Actions are pinned to commit SHAs rather than tags, because a job that reaches production
+# mints a GCP credential. Dependabot understands a pinned SHA and raises a PR that moves it,
+# keeping the comment beside it in step, so pinning costs nothing in upkeep.
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Etc/GMT
+    commit-message:
+      prefix: "ci: [DEPENDABOT] "
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -26,14 +26,17 @@ xcuserdata
 /.zed/
 
 # copilot-review-bot runtime state (STATE_DIR contents), in case it is ever
-# pointed at a path inside the repo instead of its default outside it.
-/copilot-review-bot/copilot-bot-id
-/copilot-review-bot/lock
-/copilot-review-bot/requested/
+# pointed at a path inside the repo instead of its default outside it. Unanchored
+# rather than one entry per directory: the state lands beside whoever launched the
+# run, so the list of anchored paths grew every time a suite moved. Both names are
+# this bot's alone, so nothing else in the repository can be caught by them.
+lock
+requested.json
 
 # AI tools.
 /.agent
 /.agents
 /.augment
 /.claude
+/AGENTS.md
 /CLAUDE.md

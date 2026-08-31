@@ -32,13 +32,21 @@ repos:
           bash -c '
             fail=0
             for f in "$@"; do
-              d=$(shellcheck --enable=require-variable-braces --format=diff "$f")
-              if [ -n "$d" ]; then
-                printf "%s\n" "$d" | patch -p1 --no-backup-if-mismatch
+              diff=$(shellcheck --enable=require-variable-braces --format=diff "${f}")
+              if [ -n "${diff}" ]; then
+                # patch(1) is absent from the CI container, and without this the hook
+                # would report only "patch: command not found". Print the diff instead,
+                # which is the whole of what a local run would have applied.
+                if command -v patch >/dev/null 2>&1; then
+                  printf "%s\n" "${diff}" | patch -p1 --no-backup-if-mismatch
+                else
+                  printf "%s\n" "${diff}"
+                  echo "patch(1) is not available here, so the change above was not applied." >&2
+                fi
                 fail=1
               fi
             done
-            exit "$fail"
+            exit "${fail}"
           ' --
         language: python
         additional_dependencies: [shellcheck-py==0.11.0.1]

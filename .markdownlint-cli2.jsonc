@@ -2,10 +2,25 @@
   "config": {
     "default": true,
     "MD013": {
+      "line_length": 100,
       "code_blocks": false,
       "tables": false
+    },
+    "MD060": {
+      "style": "aligned"
     }
   },
   "globs": ["**/*.md"],
-  "ignores": ["**/node_modules"]
+  // `globs` above expands on its own rather than only linting the files a caller
+  // passes in, so anything gitignored still gets read. The AI tool directories are
+  // full of generated Markdown nobody edits by hand, which meant `pre-commit run
+  // --all-files` failed locally on hundreds of lines that can never be committed.
+  // Kept in step with the AI tools section of .gitignore.
+  "ignores": [
+    "**/node_modules",
+    ".agent/**",
+    ".agents/**",
+    ".augment/**",
+    ".claude/**"
+  ]
 }

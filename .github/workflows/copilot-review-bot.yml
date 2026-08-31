@@ -1,0 +1,267 @@
+name: copilot-review-bot
+
+# Test, build, deploy. Tests run for every event; the other two happen only on a
+# push to main and only after the tests pass.
+#
+# The image is the whole deployment: the bot is baked into it, so what CI built is
+# what runs and a rollback is pointing a job back at an older digest. Nothing is
+# fetched at run time.
+#
+# Actions are pinned to commit SHAs, not tags. `ship` and `deploy` mint a GCP
+# credential and can reach production, so a retagged action there would be enough to
+# exfiltrate it.
+#
+# Repo-wide linting lives in pre-commit.yml.
+on:
+  push:
+    branches: [main]
+    paths: &tool_paths
+      # Everything the tool owns lives in one directory, so this is one glob
+      # rather than a list that has to be kept in step with the layout.
+      - "copilot-review-bot/**"
+      # Named as well, rather than left to the glob. GitHub does not document whether
+      # `**` matches a leading dot, and a .dockerignore change that skipped CI would
+      # be a build-context allow-list that never got built against.
+      - "copilot-review-bot/.dockerignore"
+      - ".github/workflows/copilot-review-bot.yml"
+  pull_request:
+    paths: *tool_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # No retry-backoff variables here. Each suite wipes the environment with `env -i`
+    # and passes an explicit allow-list, so a value set at this level never reached the
+    # bot at all: it read as "backoff disabled" while every run still paid the full
+    # sleep. The suites now set the backoff to 0 themselves, which also means a
+    # developer running one locally gets the same speed as CI.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # frozen: v4
+
+      # ubuntu-latest already has bash 5, jq, curl, git, flock and python3. The
+      # suites need no token, no network and no bucket, so nothing else is set up.
+      - name: Record tool versions
+        run: |
+          bash --version | head -1
+          jq --version
+          python3 --version
+
+      - name: Decision rule tests
+        run: ./copilot-review-bot/tests/copilot-review-bot-test.sh
+
+      - name: End-to-end tests
+        run: ./copilot-review-bot/tests/copilot-review-bot-e2e-test.sh
+
+      # Skips itself without python3, so its absence would be silent. Assert it is
+      # present rather than trusting the runner image to keep it.
+      - name: Cloud Storage tests
+        run: |
+          command -v python3 >/dev/null || {
+              echo "python3 is required for the gs:// suite" >&2
+              exit 1
+          }
+          ./copilot-review-bot/tests/copilot-review-bot-gcs-test.sh
+
+      - name: Entrypoint tests
+        run: ./copilot-review-bot/tests/entrypoint-test.sh
+
+      # deploy-job.sh and rate-budget.sh are the only things here that change
+      # production, and the `deploy` job below runs them for real against a fake
+      # gcloud nowhere else.
+      - name: Deploy script tests
+        run: ./copilot-review-bot/tests/deploy-job-test.sh
+
+      # Before the image is built, not after. The GraphQL quota is per token and
+      # shared by every job, so a repo added to jobs.json can push the total over it.
+      # Reads then start failing part way through a run: each one is an ERROR
+      # `pr.read_failed`, and after three in a row the run stops with
+      # `reason=read_failures`, leaving the remaining PRs for the next run. Failing
+      # here means the pull request cannot merge; failing in `deploy` would mean an
+      # image already built and pushed. This step also validates jobs.json, so a bad
+      # entry cannot reach `deploy` either.
+      - name: Rate limit budget and jobs.json schema
+        run: ./copilot-review-bot/deploy/rate-budget.sh
+
+      # An equivalent build of the image that ships. `ship` rebuilds from the same
+      # Dockerfile rather than reusing this one, and nothing in it is version-pinned,
+      # so the two builds can carry different tool versions.
+      - name: Runtime image smoke test
+        run: |
+          docker build -f copilot-review-bot/deploy/Dockerfile \
+              -t copilot-review-bot:ci copilot-review-bot
+
+          # The image carries this commit's bot.
+          in_image="$(docker run --rm --entrypoint sha256sum \
+              copilot-review-bot:ci /app/copilot-review-bot.sh | cut -d' ' -f1)"
+          on_disk="$(sha256sum copilot-review-bot/copilot-review-bot.sh | cut -d' ' -f1)"
+          if [[ "${in_image}" != "${on_disk}" ]]; then
+              echo "the image carries a different bot: ${in_image} != ${on_disk}" >&2
+              exit 1
+          fi
+          echo "baked bot matches the working tree (${on_disk})"
+
+          # Every program the bot needs, proved to run rather than merely be present.
+          # The Dockerfile installs no coreutils or util-linux line, because both are
+          # Priority: required in Debian, so this is the only check on that
+          # assumption. Without it a base-image change that dropped timeout(1) would
+          # ship: a missing timeout only warns, and the bot would then run every gh
+          # call unbounded.
+          docker run --rm --entrypoint sh copilot-review-bot:ci -c '
+              for b in bash gh jq curl timeout flock date mktemp \
+                       sed grep tr head tail cat cp mv rm dirname uname; do
+                  v="$("${b}" --version 2>&1 | head -1)" || {
+                      echo "cannot run ${b} --version" >&2
+                      exit 1
+                  }
+                  [ -n "${v}" ] || { echo "${b} --version printed nothing" >&2; exit 1; }
+                  printf "  %-8s %s\n" "${b}" "${v}"
+              done'
+
+          # --network none is the point: the real image, with no token, no network
+          # and no GCP. The reason is asserted, not just the event, because the
+          # prerequisite check also fatals with run.fatal and exit 2 - so without it
+          # this passes for an image missing jq, flock and timeout alike.
+          out="$(docker run --rm --network none -e REPO=XRPLF/rippled \
+              copilot-review-bot:ci 2>/dev/null)" && rc=0 || rc=$?
+          printf '%s\n' "${out}"
+          [[ "${rc}" == 2 ]] || { echo "expected exit 2, got ${rc}" >&2; exit 1; }
+          jq -e 'select(.event == "run.fatal" and .reason == "no_credentials")' \
+              <<<"${out}" >/dev/null
+          [[ "$(wc -l <<<"${out}")" == 1 ]] || {
+              echo "expected exactly one event, got: ${out}" >&2
+              exit 1
+          }
+
+          # Only the bot ships. The build context is the whole tool directory, tests
+          # included, so this is what catches a COPY added later that rakes in the
+          # suites, or the whole directory, along with it.
+          contents="$(docker run --rm --entrypoint ls copilot-review-bot:ci /app)"
+          if [[ "${contents}" != "copilot-review-bot.sh" ]]; then
+              echo "unexpected contents in /app: ${contents}" >&2
+              exit 1
+          fi
+          echo "/app holds the bot and nothing else"
+
+  ship:
+    needs: test
+    # Pushes to main only. A pull request and a manual dispatch get the tests and
+    # nothing else, so neither can change what is running in production.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Serialized, never cancelled: two pushes building in parallel would leave the
+    # jobs pinned to whichever digest was pushed last rather than the newest commit.
+    concurrency:
+      group: ship-copilot-review-bot
+      cancel-in-progress: false
+    # contents: read is required as well as id-token: write. A job-level permissions
+    # block replaces the workflow-level one rather than adding to it, so every scope
+    # not named here becomes `none` - and actions/checkout cannot clone a private
+    # repository without it.
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation, no stored GCP keys
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      jobs: ${{ steps.list.outputs.names }}
+    env:
+      PROJECT_ID: xrplf-automation
+      REGION: us-central1
+      IMAGE_REPO: us-central1-docker.pkg.dev/xrplf-automation/images/copilot-review-bot
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # frozen: v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # frozen: v2.1.13
+        with:
+          workload_identity_provider: projects/21551682866/locations/global/workloadIdentityPools/github/providers/github-oidc
+          service_account: deployer@xrplf-automation.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # frozen: v2.2.1
+
+      # Built from copilot-review-bot/, the tool's own directory, which is the context
+      # both COPY paths in the Dockerfile are relative to. Uncached and rebuilt every
+      # time.
+      #
+      # The digest is published, not the tag. A tag is mutable and nothing in the
+      # Dockerfile is version-pinned, so re-running this workflow on the same commit
+      # overwrites `:<sha>` with different bytes. Pinning the jobs to the digest means
+      # the deployed image cannot change under them. `:latest` is pushed too, for the
+      # one-time bootstrap build in copilot-review-bot/deploy/README.md; nothing in
+      # production reads it.
+      - name: Build and push the runtime image
+        id: build
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          docker build -f copilot-review-bot/deploy/Dockerfile \
+              -t "${IMAGE_REPO}:${GITHUB_SHA}" -t "${IMAGE_REPO}:latest" \
+              copilot-review-bot
+          docker push --all-tags "${IMAGE_REPO}"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' \
+              "${IMAGE_REPO}:${GITHUB_SHA}")"
+          [[ "${digest}" == *@sha256:* ]] || {
+              echo "could not resolve the pushed digest, got '${digest}'" >&2
+              exit 1
+          }
+          echo "image=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "pinning the jobs to ${digest}"
+
+      # The matrix below is built from this, so adding a repo to jobs.json is the whole
+      # change: no second list to keep in step.
+      - name: List the jobs to deploy
+        id: list
+        run: |
+          names="$(jq -c '[.jobs[].repo]' copilot-review-bot/deploy/jobs.json)"
+          echo "names=${names}" >> "${GITHUB_OUTPUT}"
+          echo "deploying: ${names}"
+
+  deploy:
+    needs: ship
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # See the note on ship's permissions block: contents: read is required for the
+    # checkout, because a job-level block replaces the workflow-level one.
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      # One repo per job, so one broken entry must not stop the others reaching
+      # their new image.
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        job: ${{ fromJSON(needs.ship.outputs.jobs) }}
+    concurrency:
+      group: deploy-${{ matrix.job }}
+      cancel-in-progress: false
+    env:
+      PROJECT: xrplf-automation
+      REGION: us-central1
+      BUCKET: xrplf-copilot-review-bot-state
+      IMAGE: ${{ needs.ship.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # frozen: v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # frozen: v2.1.13
+        with:
+          workload_identity_provider: projects/21551682866/locations/global/workloadIdentityPools/github/providers/github-oidc
+          service_account: deployer@xrplf-automation.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # frozen: v2.2.1
+
+      # Creates the job and its schedule if they do not exist, updates them if they
+      # do, so jobs.json is the source of truth rather than whatever was last typed at
+      # gcloud. A value changed by hand is corrected here.
+      #
+      # The repository goes through the environment rather than into the command line.
+      # GitHub substitutes ${{ }} as literal text before bash parses it, and double
+      # quotes do not stop command substitution, so a jobs.json value containing $( )
+      # would execute here - in the job that can reach production.
+      - name: Deploy ${{ matrix.job }}
+        env:
+          JOB: ${{ matrix.job }}
+        run: ./copilot-review-bot/deploy/deploy-job.sh "${JOB}"
