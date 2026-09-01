@@ -41,7 +41,7 @@ jobs:
     # sleep. The suites now set the backoff to 0 themselves, which also means a
     # developer running one locally gets the same speed as CI.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # frozen: v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # frozen: v7.0.1
 
       # ubuntu-latest already has bash 5, jq, curl, git, flock and python3. The
       # suites need no token, no network and no bucket, so nothing else is set up.
@@ -174,14 +174,14 @@ jobs:
       REGION: us-central1
       IMAGE_REPO: us-central1-docker.pkg.dev/xrplf-automation/images/copilot-review-bot
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # frozen: v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # frozen: v7.0.1
 
-      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # frozen: v2.1.13
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # frozen: v3.0.0
         with:
           workload_identity_provider: projects/21551682866/locations/global/workloadIdentityPools/github/providers/github-oidc
           service_account: deployer@xrplf-automation.iam.gserviceaccount.com
 
-      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # frozen: v2.2.1
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # frozen: v3.0.1
 
       # Built from copilot-review-bot/, the tool's own directory, which is the context
       # both COPY paths in the Dockerfile are relative to. Uncached and rebuilt every
@@ -244,14 +244,14 @@ jobs:
       BUCKET: xrplf-copilot-review-bot-state
       IMAGE: ${{ needs.ship.outputs.image }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # frozen: v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # frozen: v7.0.1
 
-      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # frozen: v2.1.13
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # frozen: v3.0.0
         with:
           workload_identity_provider: projects/21551682866/locations/global/workloadIdentityPools/github/providers/github-oidc
           service_account: deployer@xrplf-automation.iam.gserviceaccount.com
 
-      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # frozen: v2.2.1
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # frozen: v3.0.1
 
       # Creates the job and its schedule if they do not exist, updates them if they
       # do, so jobs.json is the source of truth rather than whatever was last typed at
