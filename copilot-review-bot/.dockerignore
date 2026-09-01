@@ -1,0 +1,15 @@
+# The image build context is this directory, the tool's own, so nothing belonging to
+# another tool and no .git is ever sent to the daemon. What is left to exclude is this
+# tool's tests and deployment scripts, none of which the image needs.
+#
+# An allow-list naming exactly the two paths deploy/Dockerfile COPYs, rather than a
+# deny-list. A deny-list has to be kept in step with .gitignore by hand, and it had
+# already drifted: it still excluded a state file the bot stopped writing. This cannot
+# go stale, because anything not named here is excluded by construction.
+#
+# This governs what is *transferred*, not what ends up in the image: the Dockerfile
+# COPYs two named files, so nothing here can leak into the result. The smoke test in CI
+# is what checks the image contents.
+*
+!copilot-review-bot.sh
+!deploy/entrypoint.sh

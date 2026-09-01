@@ -1,0 +1,33 @@
+name: Run pre-commit hooks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # Call the workflow in the XRPLF/actions repo that runs the pre-commit hooks.
+  # This is the only linting gate: .pre-commit-config.yaml is the single source of
+  # truth for shellcheck, shfmt and markdownlint, so CI and a developer's own
+  # hooks cannot drift apart.
+  #
+  # A container is required, and every other XRPLF caller passes one. That workflow calls
+  # XRPLF/actions/prepare-runner, which on Linux sets CCACHE_DIR=/root/.ccache and then
+  # creates it unconditionally: the mkdir is not gated on the ccache setting, and a reusable
+  # workflow call cannot pass `env:` to point it elsewhere. Run natively it therefore fails
+  # with "mkdir: cannot create directory '/root': Permission denied", whatever else is
+  # configured.
+  #
+  # This image rather than one of the C++ ones, because it is the smallest that runs these
+  # four hooks. It carries python and pre-commit; node is absent and does not need to be,
+  # since pre-commit installs its own for markdownlint-cli2, and shfmt fetches a prebuilt
+  # binary. The one gap is patch(1): when the brace hook has something to fix it cannot
+  # apply it here and reports "patch: command not found" instead of the diff. The hook still
+  # fails the build, so nothing slips through, and the local hook prints the diff instead.
+  run-hooks:
+    uses: XRPLF/actions/.github/workflows/pre-commit.yml@f1952595d212e86169935135efc66294b4574131
+    with:
+      runs_on: ubuntu-latest
+      container: '{ "image": "ghcr.io/xrplf/ci/tools-rippled-pre-commit:sha-41ec7c1" }'

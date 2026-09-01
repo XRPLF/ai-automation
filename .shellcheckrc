@@ -1,0 +1,9 @@
+# Follow files that are sourced, so the test suites can share test-lib.sh without
+# every `. "${SUITE_DIR}/test-lib.sh"` reporting SC1091. Equivalent to passing -x,
+# but it applies wherever shellcheck runs: the pre-commit hook, CI, and by hand.
+external-sources=true
+
+# Resolve a sourced path relative to the script that sources it, not to whatever
+# directory shellcheck happens to be run from. Without this, the suites only
+# check cleanly when invoked from inside copilot-review-bot/tests/.
+source-path=SCRIPTDIR
