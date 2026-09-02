@@ -330,7 +330,7 @@ while [[ $# -gt 0 ]]; do
             case "${2%%=*}" in
                 query) query="${2#*=}" ;;
                 number) number="${2#*=}" ;;
-                prId | pullRequestId) pr_id="${2#*=}" ;;
+                pullRequestId) pr_id="${2#*=}" ;;
             esac
             shift 2
             ;;

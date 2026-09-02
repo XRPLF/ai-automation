@@ -603,9 +603,10 @@ require_boolean REWRITE_TRIGGERS_REVIEW "${REWRITE_TRIGGERS_REVIEW}"
 require_boolean TRANSIENT_FAILURES_ARE_ERRORS "${TRANSIENT_FAILURES_ARE_ERRORS}"
 require_handle MENTION_HANDLE "${MENTION_HANDLE}"
 # requestReviewsByLogin takes three separate lists - userLogins, botLogins and
-# teamSlugs - and which one a value belongs in cannot be read off the value alone. So
-# it is settled here, once per run rather than once per request, and a value that fits
-# none of them is refused before any PR is touched. The rules are gh's own, from
+# teamSlugs - and the mutation itself does not infer which one a login belongs in: the
+# caller has to choose the field. So the choice is settled here, from the shape of the
+# value, once per run rather than once per request, and a value that fits none of the
+# three is refused before any PR is touched. The rules are gh's own, from
 # partitionReviewersByType, because gh made this call until the change described in
 # "Asking Copilot, by name" in README.md, so a value that worked then works now.
 case "${REVIEWER}" in

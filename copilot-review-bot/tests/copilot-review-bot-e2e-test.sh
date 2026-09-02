@@ -57,7 +57,6 @@ while [[ $# -gt 0 ]]; do
                 content) content="${2#*=}" ;;
                 subjectId) subject="${2#*=}" ;;
                 body) body="${2#*=}" ;;
-                prId) pr_id="${2#*=}" ;;
                 pullRequestId) pr_id="${2#*=}" ;;
                 login) login="${2#*=}" ;;
             esac
