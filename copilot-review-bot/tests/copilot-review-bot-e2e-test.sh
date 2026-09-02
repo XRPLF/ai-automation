@@ -509,6 +509,65 @@ assert_eq "the message names the login to use instead" 1 \
 assert_eq "no PR was read and no request was filed" 0 \
     "$(calls "${d}/calls.log" request)"
 
+printf '\n== and any other @ value is told to drop the @, not to write Copilot ==\n'
+# The alias is the only '@' value that means Copilot. Suggesting Copilot's login for
+# '@monalisa' would answer a question nobody asked, so the fix offered is the same
+# string without the prefix, which is what the operator meant.
+d="$(scenario reviewer_at_user)"
+page "${d}" first "" 704
+pr_fresh "${d}" pr-704.json
+run "${d}" --reviewer '@monalisa'
+assert_eq "exit status is 2" 2 "${rc}"
+assert_eq "it names what was given" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and .reason=="invalid_reviewer" and .given=="@monalisa"')"
+assert_eq "the fix offered is the login without the @" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("write .monalisa."))')"
+assert_eq "and Copilot is not suggested for somebody else" 0 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("copilot-pull-request-reviewer"))')"
+
+printf '\n== a Copilot login without the bot suffix is refused at startup ==\n'
+# This is the one spelling that classified as a user and reached GitHub, which refused
+# it once per due PR until the breaker halted the run. That is the per-PR failure the
+# whole requestReviewsByLogin path exists to remove, so it fails once, before any PR.
+while read -r who; do
+    d="$(scenario "reviewer_nosuffix_$(printf '%s' "${who}" | tr -cd '[:alnum:]')")"
+    page "${d}" first "" 705
+    pr_fresh "${d}" pr-705.json
+    run "${d}" --reviewer "${who}"
+    assert_eq "${who}: exit status is 2" 2 "${rc}"
+    assert_eq "${who}: refused as an invalid reviewer" 1 \
+        "$(events "${d}/out.log" '.event=="run.fatal" and .reason=="invalid_reviewer" and .given=="'"${who}"'"')"
+    assert_eq "${who}: the message names the suffixed spelling" 1 \
+        "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("write .'"${who}"'\\[bot\\]."))')"
+    assert_eq "${who}: no PR was read and no request was filed" 0 \
+        "$(calls "${d}/calls.log" request)"
+done <<'NOSUFFIX'
+copilot-pull-request-reviewer
+Copilot-Pull-Request-Reviewer
+NOSUFFIX
+
+printf '\n== the check follows COPILOT_LOGINS, not a hardcoded spelling ==\n'
+# COPILOT_LOGINS is the list of logins that count as Copilot, and it is configurable, so
+# the guard has to read it rather than know one name. A login outside the list is an
+# ordinary user and must still be accepted.
+d="$(scenario reviewer_nosuffix_custom)"
+page "${d}" first "" 706
+pr_fresh "${d}" pr-706.json
+RUN_ENV=(COPILOT_LOGINS='house-reviewer,other-bot')
+run "${d}" --reviewer 'house-reviewer'
+assert_eq "a login named by COPILOT_LOGINS is refused" 2 "${rc}"
+assert_eq "and the suffix is named for that login" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("write .house-reviewer\\[bot\\]."))')"
+
+d="$(scenario reviewer_user_still_ok)"
+page "${d}" first "" 707
+pr_fresh "${d}" pr-707.json
+RUN_ENV=(COPILOT_LOGINS=house-reviewer)
+run "${d}" --reviewer 'monalisa'
+assert_eq "a login outside the list is still a user" 0 "${rc}"
+assert_eq "and it went out in userLogins" 1 \
+    "$(grep -cF "$(printf 'request\t707\tmonalisa\tuserLogins')" "${d}/calls.log")"
+
 printf '\n== an empty reviewer is refused once, not per PR ==\n'
 d="$(scenario reviewer_empty)"
 page "${d}" first "" 702
