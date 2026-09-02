@@ -2944,7 +2944,7 @@ if [[ -n "${explain_file}" ]]; then
     parse_copilot_logins
     viewer="${VIEWER_LOGIN:-xrplf-bot}"
     MENTION_SINCE="${MENTION_SINCE:-1970-01-01T00:00:00Z}"
-    printf 'id\tnumber\tdraft\tbase\thead\thas_review\tpending\tthreads\tunresolved\treviewed_head\tnew_work\tbasis\tnew_count\tnew_oid\tnew_date\tlast_review\treviewed_oid\tstate\tcommit_total\n'
+    printf 'id\tnumber\tdraft\tbase\thead\thas_review\tpending\tthreads\tunresolved\treviewed_head\tnew_work\tbasis\tnew_count\tnew_oid\tnew_date\tlast_review\treviewed_oid\tstate\tcommit_total\tmergeable\n'
     jq -r "${jq_args[@]}" "${JQ_DECIDE}" "${explain_file}"
     printf -- '--- mentions (id, kind, createdAt, author) ---\n'
     jq -r "${jq_args[@]}" --arg viewer "${viewer}" --arg since "${MENTION_SINCE}" \
