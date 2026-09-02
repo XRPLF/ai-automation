@@ -184,11 +184,15 @@ page() { # <dir> <cursor-name> <next-cursor-or-empty> <numbers...>
                 nodes:($nums|map({number:.}))}}}}' >"${d}/page-${name}.json"
 }
 
-# A PR nobody has reviewed, so it is due for one.
+# A PR nobody has reviewed, so it is due for one. mergeable is part of "due": a request
+# needs MERGEABLE, so a fixture without it would be skipped for mergeability and every
+# case here would be testing the wrong thing. Pass {"mergeable":...} to override it,
+# including to null, which is how the absent-field path is reached.
 pr_fresh() { # <dir> <file-name> [extra-json]
     local d="$1" f="$2" extra="${3:-{\}}"
     jq -n --argjson extra "${extra}" '{
         isDraft:false, baseRefName:"develop", headRefOid:"head1",
+        mergeable:"MERGEABLE",
         author:{login:"alice"},
         commits:{nodes:[{commit:{oid:"head1",
             authoredDate:"2026-08-01T10:00:00Z",
@@ -537,7 +541,7 @@ page "${d}" first C1 "${batch1[@]}"
 page "${d}" C1 C2 "${batch2[@]}"
 page "${d}" C2 "" "${batch3[@]}"
 # Drafts, so all 320 are inspected and none is acted on.
-jq -n '{isDraft:true, baseRefName:"develop", headRefOid:"head1",
+jq -n '{isDraft:true, baseRefName:"develop", headRefOid:"head1", mergeable:"MERGEABLE",
         commits:{nodes:[{commit:{oid:"head1",authoredDate:"2026-08-01T10:00:00Z",
         committedDate:"2026-08-01T10:00:00Z",parents:{totalCount:1}}}]}}' >"${d}/pr-any.json"
 run "${d}"
@@ -669,6 +673,77 @@ for case_name in already_reviewed pending; do
         "$(events "${d}/out.log" ".event==\"mention.no_action\" and .reason==\"${want_reason}\"")"
 done
 
+printf '\n== a mention on a conflicting PR is held, not answered ==\n'
+# The one case where a mention gets no reaction at all. A conflict is the author's to
+# fix and the ask was never served, so a reaction would close it permanently and lose
+# it. Left unreacted, the next run sees the mention still outstanding and honors it as
+# soon as the conflict clears, with nobody asking twice.
+d="$(scenario mention_conflicting)"
+page "${d}" first "" 203
+pr_fresh "${d}" pr-203.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"CONFLICTING"}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "no request was filed" 0 "$(calls "${d}/calls.log" request)"
+assert_eq "and no reaction was written, so the mention stays outstanding" 0 \
+    "$(calls "${d}/calls.log" react)"
+assert_eq "it said the mention is being held, and why" 1 \
+    "$(events "${d}/out.log" '.event=="mention.deferred" and .reason=="conflicting"')"
+# The automatic path would reach the same conclusion, so reporting it twice for one PR
+# would make two events out of one decision.
+assert_eq "the automatic skip did not also fire for the same PR" 0 \
+    "$(events "${d}/out.log" '.event=="pr.skipped"')"
+
+printf '\n== and an unestablished merge state holds it the same way ==\n'
+# Same hold, different reason. The asker is told nothing either way, so the log is the
+# only place the difference shows, and it is the difference between "GitHub did not
+# answer" and "this branch conflicts".
+d="$(scenario mention_mergeable_unknown)"
+page "${d}" first "" 206
+pr_fresh "${d}" pr-206.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"UNKNOWN"}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "no request was filed" 0 "$(calls "${d}/calls.log" request)"
+assert_eq "and no reaction was written" 0 "$(calls "${d}/calls.log" react)"
+assert_eq "held under its own reason, not as a conflict" 1 \
+    "$(events "${d}/out.log" '.event=="mention.deferred" and .reason=="mergeable_unknown"')"
+
+printf '\n== unless Copilot already reviewed it, which answers the ask ==\n'
+# Both true at once: the branch conflicts and the head is already reviewed. The asker
+# has their review, so the comment is answered rather than held. Holding it would leave
+# a served request outstanding until it aged out, on a conflict nobody may ever fix.
+d="$(scenario mention_conflicting_reviewed)"
+page "${d}" first "" 205
+pr_fresh "${d}" pr-205.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"CONFLICTING",
+        reviews:{nodes:[{submittedAt:"2026-08-02T10:00:00Z",
+            author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
+            commit:{oid:"head1"}}]}}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "no request was filed" 0 "$(calls "${d}/calls.log" request)"
+assert_eq "the mention got eyes, not silence" 1 \
+    "$(grep -c 'react.*IC_1.*EYES' "${d}/calls.log")"
+assert_eq "and the reason is the review, not the conflict" 1 \
+    "$(events "${d}/out.log" '.event=="mention.no_action" and .reason=="already_reviewed_head"')"
+assert_eq "so nothing was held" 0 \
+    "$(events "${d}/out.log" '.event=="mention.deferred"')"
+
+printf '\n== and it is honored once the conflict clears ==\n'
+# Same mention, same PR, conflict resolved. Nothing about the comment changed, so this
+# is the case that fails if a reaction is ever written above.
+d="$(scenario mention_conflict_cleared)"
+page "${d}" first "" 204
+pr_fresh "${d}" pr-204.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"MERGEABLE"}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "the request was filed on the strength of the old mention" 1 \
+    "$(calls "${d}/calls.log" request)"
+assert_eq "and the mention got its thumbs up" 1 \
+    "$(grep -c 'react.*IC_1.*THUMBS_UP' "${d}/calls.log")"
+
 # ===========================================================================
 printf '\n== every automatic skip guard actually stops the request ==\n'
 # The decision-rule suite proves the jq fields. These prove the guards act on
@@ -700,6 +775,36 @@ skip_case unresolved unresolved_threads "$(jq -n \
     reviewThreads:{nodes:[{isResolved:false,isOutdated:false,
         opener:{nodes:[{author:{__typename:"Bot",login:"copilot-pull-request-reviewer"}}]},
         comments:{nodes:[]}}]}}')"
+skip_case conflicting conflicting '{"mergeable":"CONFLICTING"}'
+# UNKNOWN stops a request too, but under its own reason, because the log must not claim
+# a conflict on a PR that has none. A run full of mergeable_unknown is GitHub failing to
+# answer; a run full of conflicting is the repository's state.
+skip_case mergeable_unknown mergeable_unknown '{"mergeable":"UNKNOWN"}'
+# No field at all is the same case: it is what --explain gets from a capture taken before
+# the field was selected, and it reads as UNKNOWN rather than as a missing gate.
+skip_case mergeable_absent mergeable_unknown '{"mergeable":null}'
+
+# MERGEABLE is the only value that files a request. This is the positive control for the
+# whole gate: written as "not MERGEABLE", one wrong value here stops every request on the
+# repository, and it stops them the way a healthy quiet run looks.
+d="$(scenario mergeable_yes)"
+page "${d}" first "" 303
+pr_fresh "${d}" pr-303.json '{"mergeable":"MERGEABLE"}'
+run "${d}" --verbose
+assert_eq "MERGEABLE: the request is filed" 1 "$(calls "${d}/calls.log" request)"
+assert_eq "MERGEABLE: and nothing was skipped for mergeability" 0 \
+    "$(events "${d}/out.log" '.event=="pr.skipped" and (.reason=="conflicting" or .reason=="mergeable_unknown")')"
+
+# A value GitHub has not invented yet. The gate has to fail closed on it: an unknown
+# fourth state is exactly the case where requesting on an unverified merge is worst.
+d="$(scenario mergeable_future_value)"
+page "${d}" first "" 305
+pr_fresh "${d}" pr-305.json '{"mergeable":"SOMETHING_NEW"}'
+run "${d}" --verbose
+assert_eq "an unrecognized mergeable value stops the request" 0 \
+    "$(calls "${d}/calls.log" request)"
+assert_eq "and is reported as unknown, not as a conflict" 1 \
+    "$(events "${d}/out.log" '.event=="pr.skipped" and .reason=="mergeable_unknown" and .mergeable=="SOMETHING_NEW"')"
 
 # A User account is not the reviewer bot even when its login is the bot's, so its
 # review must not suppress anything. The login matches the list on purpose: __typename
@@ -721,7 +826,7 @@ printf '\n== a re-review is requested once new work lands ==\n'
 d="$(scenario new_work)"
 page "${d}" first "" 303
 jq -n '{
-    isDraft:false, baseRefName:"develop", headRefOid:"head2",
+    isDraft:false, baseRefName:"develop", headRefOid:"head2", mergeable:"MERGEABLE",
     reviews:{nodes:[{submittedAt:"2026-08-02T10:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
         commit:{oid:"head1"}}]},
@@ -886,7 +991,7 @@ d="$(scenario logins_spaced)"
 page "${d}" first "" 508
 # Copilot has reviewed the head commit, so the run is only due a request if the
 # reviewer's login failed to match, which is what the list here decides.
-jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"head1",
+jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"head1", mergeable:"MERGEABLE",
         commits:{nodes:[{commit:{oid:"head1",authoredDate:"2026-08-01T10:00:00Z",
             committedDate:"2026-08-01T10:00:00Z",parents:{totalCount:1}}}]},
         reviews:{nodes:[{author:{login:"Some-Copilot",__typename:"Bot"},
@@ -1149,7 +1254,7 @@ printf '\n== the remaining basis arms are spelled out in the log ==\n'
 d="$(scenario basis_authored)"
 page "${d}" first "" 751
 jq -n '{
-    isDraft:false, baseRefName:"develop", headRefOid:"new1",
+    isDraft:false, baseRefName:"develop", headRefOid:"new1", mergeable:"MERGEABLE",
     reviews:{nodes:[{submittedAt:"2026-08-02T10:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
         commit:{oid:"gone1"}}]},
@@ -1166,7 +1271,7 @@ assert_eq "and the basis is recorded as authored" 1 \
 d="$(scenario basis_rewritten)"
 page "${d}" first "" 752
 jq -n '{
-    isDraft:false, baseRefName:"develop", headRefOid:"new2",
+    isDraft:false, baseRefName:"develop", headRefOid:"new2", mergeable:"MERGEABLE",
     reviews:{nodes:[{submittedAt:"2026-08-10T10:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
         commit:{oid:"gone2"}}]},
@@ -1612,7 +1717,7 @@ printf '\n== a branch refreshed from base only is left alone ==\n'
 # end to end. Pulling the base branch in must never trigger a review.
 d="$(scenario merge_only)"
 page "${d}" first "" 981
-jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"merge1",
+jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"merge1", mergeable:"MERGEABLE",
     author:{login:"alice"},
     reviews:{nodes:[{submittedAt:"2026-08-02T00:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},

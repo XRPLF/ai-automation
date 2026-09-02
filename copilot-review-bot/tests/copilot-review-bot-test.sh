@@ -30,11 +30,12 @@ trap 'rm -rf "$tmp"' EXIT
 #   1 id  2 number  3 draft  4 base  5 head  6 has_review  7 pending
 #   8 threads  9 unresolved  10 reviewed_head  11 new_work  12 basis
 #   13 new_count  14 new_oid  15 new_date  16 last_review  17 reviewed_oid
+#   18 state  19 commit_total  20 mergeable
 declare -A FIELD=(
     [draft]=3 [base]=4 [head]=5 [has_review]=6 [pending]=7
     [threads]=8 [unresolved]=9 [reviewed_head]=10 [new_work]=11
     [basis]=12 [new_count]=13 [new_oid]=14
-    [commit_total]=19
+    [commit_total]=19 [mergeable]=20
 )
 
 # check <name> <json> <expect-mentions> <field=value>...
@@ -482,5 +483,38 @@ check "a payload with no totalCount explains as it did before" '{
      "commit":{"oid":"gone"}}
   ]}
 }' 0 has_review=1 new_work=0 basis=rewritten commit_total=2
+
+# --- mergeability -----------------------------------------------------------
+# The decision record carries GitHub state verbatim, and the gate on it lives in the
+# shell, which needs MERGEABLE and stops on anything else. So these three cases pin down
+# what reaches that gate, including the two values that stop it: the conflict and the
+# no-answer-yet.
+check "a conflicting branch is reported as conflicting" '{
+  "id":"PR_39","number":39,"isDraft":false,"baseRefName":"develop","headRefOid":"c1",
+  "mergeable":"CONFLICTING",
+  "commits":{"totalCount":1,"nodes":[
+    {"commit":{"oid":"c1","authoredDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}
+  ]}
+}' 0 mergeable=CONFLICTING has_review=0
+
+check "a mergeable branch is reported as mergeable" '{
+  "id":"PR_40","number":40,"isDraft":false,"baseRefName":"develop","headRefOid":"c1",
+  "mergeable":"MERGEABLE",
+  "commits":{"totalCount":1,"nodes":[
+    {"commit":{"oid":"c1","authoredDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}
+  ]}
+}' 0 mergeable=MERGEABLE has_review=0
+
+# GitHub computes mergeability in the background, so a fresh PR answers UNKNOWN, and so
+# does any payload captured before this field was selected. Both have to reach the shell
+# as UNKNOWN and not as some third thing, because the gate reports them under their own
+# reason - mergeable_unknown, never conflicting - so that a log full of them reads as
+# GitHub failing to answer rather than as a repository full of conflicts.
+check "an uncomputed or absent mergeable state reads as UNKNOWN" '{
+  "id":"PR_41","number":41,"isDraft":false,"baseRefName":"develop","headRefOid":"c1",
+  "commits":{"totalCount":1,"nodes":[
+    {"commit":{"oid":"c1","authoredDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}
+  ]}
+}' 0 mergeable=UNKNOWN has_review=0
 
 summary
