@@ -31,8 +31,11 @@ trap 'rm -rf "$tmp"' EXIT
 #   8 threads  9 unresolved  10 reviewed_head  11 new_work  12 basis
 #   13 new_count  14 new_oid  15 new_date  16 last_review  17 reviewed_oid
 #   18 state  19 commit_total  20 mergeable
+#
+# Only the fields a check() call names, so the indices are deliberately not
+# contiguous. Add an entry when a case needs to assert on the field.
 declare -A FIELD=(
-    [draft]=3 [base]=4 [head]=5 [has_review]=6 [pending]=7
+    [draft]=3 [base]=4 [has_review]=6 [pending]=7
     [threads]=8 [unresolved]=9 [reviewed_head]=10 [new_work]=11
     [basis]=12 [new_count]=13 [new_oid]=14
     [commit_total]=19 [mergeable]=20
