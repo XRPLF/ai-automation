@@ -22,9 +22,10 @@ tests/deploy-job-test.sh                # deploy/deploy-job.sh and deploy/rate-b
 
 Each one prints its own pass and fail totals, and exits 1 if anything failed.
 
-No suite needs a GitHub token, a network, a bucket, or any GCP credential. Only
-`copilot-review-bot-gcs-test.sh` needs more than bash, `jq` and `curl`: it needs `python3` for its
-stub server, and it skips itself, loudly, without it. The `test` job in
+No suite needs a GitHub token, a network, a bucket, or any GCP credential. Two need more than bash and
+`jq`. `copilot-review-bot-e2e-test.sh` needs `flock`, which is not stock on macOS, because a local
+state root locks with it. `copilot-review-bot-gcs-test.sh` needs `curl` and `python3` for its stub
+server, and it skips itself, loudly, without `python3`. The `test` job in
 [`copilot-review-bot.yml`](../../.github/workflows/copilot-review-bot.yml) runs all five on every
 push and pull request touching `copilot-review-bot/`, and asserts `python3` is present so that skip
 cannot pass silently in CI.

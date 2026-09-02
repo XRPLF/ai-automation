@@ -238,6 +238,11 @@ GitHub computes mergeability in a background job, and querying the field is what
 so a PR that changed recently answers `UNKNOWN` until the job has run. It usually clears within
 minutes, but **it does not always clear**; updating the branch can get it unstuck.
 
+The base branch moving invalidates it too, for every open PR targeting that base at once. On a
+busy repository that makes `mergeable_unknown` the ordinary skip reason rather than a rare one,
+so counting it is only meaningful against the merge rate of the base. The cost is a delay of at
+most one tick, because the next run reads the answer the previous one scheduled.
+
 The trade was made deliberately, in favor of never requesting a review of a diff whose mergeability
 is unconfirmed. If reviews ever appear to have stopped, `reason=mergeable_unknown` is the first thing
 to count in the log:
@@ -708,7 +713,7 @@ token rotation gone wrong is diagnosed by filtering on them.
 | `access.fine_grained_pat` | A fine-grained PAT that was never granted this repository, which is deny-by-default even for public ones.                                                              |
 | `access.anonymous_probe`  | What an anonymous client sees for the same repository, which separates a token problem from a repository problem. ERROR, except an inconclusive probe, which is DEBUG. |
 
-`remedy` is not confined to that family. Seven events carry one, and it always names the fix rather
+`remedy` is not confined to that family. Eight events carry one, and it always names the fix rather
 than the fault, so a filter on `remedy` finds every event somebody can act on:
 
 | Event                                       | `remedy`                       |
@@ -720,6 +725,7 @@ than the fault, so a filter on `remedy` finds every event somebody can act on:
 | `run.no_gh_timeout`                         | `install_coreutils`            |
 | `requests.halted`, the permanent breaker    | `check_role_seat_and_reviewer` |
 | `state.ephemeral`                           | `use_gcs_state_dir`            |
+| `repo.more_prs_than_expected`               | `raise_expected_open_prs`      |
 
 ## Options
 
@@ -805,8 +811,9 @@ Three more variables exist only so a test can substitute a stub. They are listed
 ## Cost and duration per run
 
 One repository with `N` open PRs costs roughly `1 + ceil(N/100) + N` GraphQL calls: one to identify
-the token, one per page of the PR list, and one per PR. Add two per review request, and a handful of
-small Cloud Storage calls per run for the lock and state.
+the token, one per page of the PR list, and one per PR. Add one per review request, which is a single
+`requestReviewsByLogin` mutation, and a handful of small Cloud Storage calls per run for the lock and
+state.
 
 **Calls are not points**, and the cost is not derivable from the node count either. The measured
 per-call costs and the fleet-wide ceiling live with the code that consumes them, in [Rate limit

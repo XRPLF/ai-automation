@@ -130,7 +130,7 @@ The token in `gh-token` needs access to **each watched repository only**, and ne
 | Token type       | Scopes                                                                                                                                                                                                                                                                          |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Fine-grained PAT | `Pull requests: Read and write` to request reviews and post the error comments. `Contents: Read` so a commit's parents can be read, which is how a merge commit is told from real work. `Issues: Read and write` for the reactions. `Metadata: Read` is attached automatically. |
-| Classic PAT      | `repo`, or `public_repo` if every watched repository is public, as well as `read:org`.                                                                                                                                                                                          |
+| Classic PAT      | `repo`, or `public_repo` if every watched repository is public.                                                                                                                                                                                                                 |
 
 A fine-grained PAT is deny-by-default even for public repositories, so each watched repository has to
 be added to it explicitly.
@@ -151,6 +151,13 @@ Two more requirements are both silent failure modes if missed:
 * The account must separately hold a **Copilot license or seat** for the repository. Without one, the
   request is filed and never acted on, indistinguishable from the bot succeeding and Copilot ignoring
   it.
+
+**`gh-token` is currently a classic PAT, wider than the bot needs.** It predates the scopes above: the
+old entrypoint cloned `XRPLF/ai-automation` on every tick, which needed repository-wide access, so a
+classic PAT was the only fit. Nothing clones that repository now, so a fine-grained PAT scoped to the
+watched repositories is enough, and swapping it is a Secret Manager change with no code change. See
+[Rotate the token](#rotate-the-token). Until then its blast radius is every repository the account can
+see.
 
 **The token has an expiry and nothing in this repository tracks it.** When it expires, every tick
 fails at the first read with `event=repo.list_failed`, which diagnoses the token itself. Record the
@@ -237,6 +244,10 @@ is the fleet that gets deployed.
 | `lock_ttl_minutes`           | no       | Default 25.                                                                                                                                                                                                    |
 | `run_deadline_seconds`       | no       | Default 900.                                                                                                                                                                                                   |
 | `memory`                     | no       | Default `512Mi`.                                                                                                                                                                                               |
+
+**No string value here may contain an `@`.** `deploy-job.sh` joins the environment with `^@^`, so the
+delimiter cannot appear inside a value. `rate-budget.sh` refuses any string field that holds one,
+naming the field, rather than letting it corrupt the job's environment at deploy time.
 
 [`rate-budget.sh`](rate-budget.sh) validates all of this before anything is built, and asserts one
 relationship that matters:
@@ -682,11 +693,13 @@ a policy edit.
 
 Eight steps, in order. Everything here already exists for the repositories in
 [`jobs.json`](jobs.json), so the whole list is the path for a **new organization or a new GCP
-project**. Adding a repository to the existing setup is steps 3, 7 and 8 only, plus step 4 if the
-token is a fine-grained PAT, since that kind has to be granted each repository explicitly.
+project**. Adding a repository to the existing setup is steps 3 and 7 only, plus step 4 if the token
+is a fine-grained PAT, since that kind has to be granted each repository explicitly. Step 8 is not on
+that list: the alert policies group by job name, so they cover a new job without an edit.
 
 The two halves are independent until step 5: the GitHub half decides what the bot may do, and the GCP
-half decides what may run it. Two of the eight steps are not automated at all.
+half decides what may run it. Only step 7 is automated, and step 5 is scripted but run by hand. The
+other six are manual.
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 18, 'rankSpacing': 34}, 'themeVariables': {'fontSize': '13px'}}}%%
