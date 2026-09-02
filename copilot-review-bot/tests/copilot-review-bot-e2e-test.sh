@@ -1537,6 +1537,9 @@ assert_eq "the request went out" 1 "$(calls "${d}/calls.log" request)"
 assert_eq "the repository was never listed" 0 "$(calls "${d}/calls.log" list)"
 
 printf '\n== --pr reports a repository it cannot read ==\n'
+# The PR is there to serve, so nothing here is missing and the repository read is the
+# only thing that fails. The last assertion is what earns that fixture: it pins the bot
+# stopping before a PR it could have fetched, which is the whole claim of the case.
 d="$(scenario pr_repo_unreadable)"
 pr_fresh "${d}" pr-844.json
 printf 'HTTP 404: Could not resolve to a Repository\n' >"${d}/fail-page-first"
@@ -1546,6 +1549,8 @@ assert_eq "it reported the repository read, not the PR" 1 \
     "$(events "${d}/out.log" '.event=="repo.read_failed"')"
 assert_eq "and diagnosed the access failure" 1 \
     "$(events "${d}/out.log" '.event=="access.denied"')"
+assert_eq "and the PR was never fetched, though it was there to fetch" 0 \
+    "$(calls "${d}/calls.log" pr)"
 
 # ===========================================================================
 printf '\n== a --base that no PR targets is called out, not silently ignored ==\n'
