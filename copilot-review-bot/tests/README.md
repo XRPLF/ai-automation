@@ -208,4 +208,3 @@ only way to check it is to watch a real request land.
 * [../README.md](../README.md) - what the bot does, its options, and what it logs.
 * [../deploy/README.md](../deploy/README.md) - how it runs in production, and who may change it.
 * [../../CONTRIBUTING.md](../../CONTRIBUTING.md) - hooks, branches, and adding a tool.
-</content>

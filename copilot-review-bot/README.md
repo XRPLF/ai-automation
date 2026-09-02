@@ -319,7 +319,7 @@ and the string on the wire are always the same.
 
 The suffix is the one place this differs from `COPILOT_LOGINS`, which holds `copilot-pull-request-reviewer`
 with no suffix: that variable holds what GraphQL *reports* on a `Bot` node, while `--reviewer` holds
-what the mutation *accepts`.
+what the mutation *accepts*.
 
 `requestReviewsByLogin` is **not available on GitHub Enterprise Server**. Nothing here targets GHES.
 
@@ -889,4 +889,3 @@ available and a large share of the fleet's spend goes away.
 * [tests/README.md](tests/README.md) - the five suites, `--explain`, and running the bot by hand.
 * [deploy/README.md](deploy/README.md) - the image, the Cloud Run job, permissions, and the runbook.
 * [../README.md](../README.md) - the repository, and the CI that ships this.
-</content>

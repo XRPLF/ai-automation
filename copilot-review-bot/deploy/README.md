@@ -312,7 +312,8 @@ alerting](#monitoring-and-alerting).
 
 ## Rate limit budget
 
-GitHub's GraphQL quota is **5000 points per hour, per token**. Every job uses the same `gh-token`, so
+GitHub's GraphQL quota is **5000 points per hour, per account** (see [Why one process per
+repository](../README.md#why-one-process-per-repository)). Every job uses the same `gh-token`, so
 adding a repository spends the other jobs' budget.
 
 When the quota runs out, reads start failing part way through a run: each is an ERROR
@@ -864,4 +865,3 @@ a format mismatch.
 * [../README.md](../README.md) - what the bot decides, its options, and what it logs.
 * [../tests/README.md](../tests/README.md) - the suites, and how to run the bot by hand.
 * [../../README.md](../../README.md) - the repository, and the CI that ships this.
-</content>
