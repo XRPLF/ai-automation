@@ -345,7 +345,8 @@ the request cap is reached. Actual spend in an idle hour runs well below the cha
 
 **Lowering `ticks_per_hour` is the lever, not raising a cap.** Halving it halves a job's hourly cost.
 Lowering `max_requests_per_run` barely helps, since almost all the cost is reads. Past that, the only
-real headroom is a second token.
+real headroom is a token for a second account. Another token for the same account shares the same
+budget and adds nothing.
 
 ### When the count drifts
 
