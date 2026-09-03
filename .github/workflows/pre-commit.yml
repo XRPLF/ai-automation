@@ -13,12 +13,8 @@ jobs:
   # truth for shellcheck, shfmt and markdownlint, so CI and a developer's own
   # hooks cannot drift apart.
   #
-  # A container is required, and every other XRPLF caller passes one. That workflow calls
-  # XRPLF/actions/prepare-runner, which on Linux sets CCACHE_DIR=/root/.ccache and then
-  # creates it unconditionally: the mkdir is not gated on the ccache setting, and a reusable
-  # workflow call cannot pass `env:` to point it elsewhere. Run natively it therefore fails
-  # with "mkdir: cannot create directory '/root': Permission denied", whatever else is
-  # configured.
+  # The container carries the toolchain: that workflow invokes `pre-commit` directly and
+  # never installs it, so the image has to supply it. It is the only reason one is passed.
   #
   # This image rather than one of the C++ ones, because it is the smallest that runs these
   # four hooks. It carries python and pre-commit; node is absent and does not need to be,
@@ -27,7 +23,7 @@ jobs:
   # apply it here and reports "patch: command not found" instead of the diff. The hook still
   # fails the build, so nothing slips through, and the local hook prints the diff instead.
   run-hooks:
-    uses: XRPLF/actions/.github/workflows/pre-commit.yml@f1952595d212e86169935135efc66294b4574131
+    uses: XRPLF/actions/.github/workflows/pre-commit.yml@279ec358f4a1be4088be3e024b07916fa97c75b6
     with:
       runs_on: ubuntu-latest
       container: '{ "image": "ghcr.io/xrplf/ci/tools-rippled-pre-commit:sha-41ec7c1" }'
