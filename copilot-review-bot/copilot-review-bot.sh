@@ -576,10 +576,10 @@ require_handle() { # <name> <value>
         "a GitHub login with no leading '@' (letters, digits and hyphens only)"
 }
 
-# True when <login> is one of the comma separated COPILOT_LOGINS. Compared the way
-# is_copilot compares: case insensitively, with blanks around a separator ignored and
-# empty entries dropped. Pure shell rather than jq, so the answer is available while
-# options are still being validated, which is before require_binaries has run.
+# True when <login> is one of the comma separated COPILOT_LOGINS. The comparison is
+# is_copilot's: case insensitive, with blanks around a separator ignored and empty
+# entries dropped. Pure shell rather than jq, so the answer is available while options
+# are still being validated, which is before require_binaries has run.
 names_copilot() { # <login>
     local want="${1,,}" entry
     local -a entries=()
