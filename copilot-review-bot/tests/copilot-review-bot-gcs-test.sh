@@ -349,7 +349,7 @@ case "${query}" in
         printf '{"data":{"repository":{"defaultBranchRef":{"name":"develop"},"pullRequests":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"number":42}]}}}}\n' ;;
     *reviewThreads*)
         printf 'pr\t%s\n' "${number}" >>"${log}"
-        printf '{"data":{"repository":{"pullRequest":{"id":"PR_42","number":42,"isDraft":false,"baseRefName":"develop","headRefOid":"head1","commits":{"nodes":[{"commit":{"oid":"head1","authoredDate":"2026-08-01T10:00:00Z","committedDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}]}}}}}\n' ;;
+        printf '{"data":{"repository":{"pullRequest":{"id":"PR_42","number":42,"isDraft":false,"baseRefName":"develop","headRefOid":"head1","mergeable":"MERGEABLE","commits":{"nodes":[{"commit":{"oid":"head1","authoredDate":"2026-08-01T10:00:00Z","committedDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}]}}}}}\n' ;;
     *) printf 'stub gh: unexpected query\n' >&2; exit 1 ;;
 esac
 exit 0

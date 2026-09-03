@@ -708,6 +708,11 @@ def thread_opener:
 # Fields: id  number  is_draft  base_ref  head_oid  has_review  pending
 #         threads  unresolved  reviewed_head  new_work  basis  new_count
 #         new_oid  new_date  last_review_at  reviewed_oid  state  commit_total
+#         mergeable
+#
+# New fields are appended, never inserted. The record is read positionally here and
+# by index in copilot-review-bot-test.sh, so inserting one silently reassigns every
+# field after it.
 #
 # "new_work" is the interesting one. Preferred method is positional: find the
 # commit Copilot last reviewed in the PR's commit list and ask whether anything
@@ -802,7 +807,10 @@ JQ_DECIDE="${JQ_LIB}"'
     # OPEN when the field is absent, so a payload captured before it was selected
     # still explains under --explain.
     ($pr.state // "OPEN"),
-    ($commit_total | tostring) ]
+    ($commit_total | tostring),
+    # UNKNOWN when absent, for the same reason, and it reads correctly either way:
+    # a payload captured before this field existed genuinely does not know.
+    ($pr.mergeable // "UNKNOWN") ]
 | @tsv
 '
 
@@ -892,6 +900,11 @@ query($owner: String!, $name: String!, $number: Int!) {
       state
       baseRefName
       headRefOid
+      # CONFLICTING, MERGEABLE, or UNKNOWN. GitHub computes this in the background and
+      # asking is what starts the computation, so UNKNOWN means "no answer yet" rather
+      # than anything about the PR. A request needs MERGEABLE: the other two both stop
+      # it. See "Conflicts with the base branch" in README.md.
+      mergeable
       reviewRequests(first: 100) {
         nodes {
           requestedReviewer {
@@ -2223,11 +2236,12 @@ mention_writes_exhausted() {
 #    which reach the same conclusion and skip.
 # 1  this PR is settled for this run, and the caller must not fall through. Either a
 #    request was attempted for it - falling through would file it twice and burn
-#    another slot - or the mention scan itself failed, or the request was deferred or
-#    failed transiently and the next run should see the mention as outstanding.
-handle_mentions() { # <pr-id> <marker> <head-oid> <reviewed-head> <pending> <file>
+#    another slot - or the mention scan itself failed, or the request was deferred,
+#    failed transiently, or is held on a conflict, and the next run should see the
+#    mention as outstanding.
+handle_mentions() { # <pr-id> <marker> <head-oid> <reviewed-head> <pending> <mergeable> <file>
     local pr_id="$1" marker="$2" head_oid="$3" \
-        reviewed_head="$4" pending="$5" file="$6"
+        reviewed_head="$4" pending="$5" mergeable="$6" file="$7"
     local mentions="" attempted=false result=""
     local jq_err="${TMPDIR_RUN}/jq-error"
     # Guarded like the decision above: an unguarded assignment propagates a jq
@@ -2240,6 +2254,7 @@ handle_mentions() { # <pr-id> <marker> <head-oid> <reviewed-head> <pending> <fil
         return 1
     fi
     [[ -n "${mentions}" ]] || return 0
+
     # Decide once for the PR, then answer every unhandled mention on it.
     local want_request=true reason="" reason_code=""
     if [[ "${reviewed_head}" == 1 ]]; then
@@ -2250,6 +2265,33 @@ handle_mentions() { # <pr-id> <marker> <head-oid> <reviewed-head> <pending> <fil
         want_request=false
         reason="a Copilot review is already pending on this PR"
         reason_code=request_pending
+    elif [[ "${mergeable}" != MERGEABLE ]]; then
+        # A mention bypasses the draft and base-branch gates, because somebody asking
+        # by name has overridden the policy those two encode. It does not bypass this
+        # one: a review of a diff that cannot merge, or that GitHub cannot confirm
+        # merges, is of no use to whoever asked. Same rule as the automatic path.
+        #
+        # Tested after the two above, not before, so a conflicting PR that Copilot has
+        # already reviewed still answers EYES. The asker has their review, and holding
+        # their comment for a conflict they may never fix would leave it unanswered
+        # forever.
+        #
+        # This is the one outcome that writes no reaction, which is how every unsettled
+        # outcome is handled here. Once the branch merges cleanly, the next run sees the
+        # mention still outstanding and honors it with no second ask. A reaction is
+        # permanent bookkeeping, so it would close a request that was never served. If
+        # it never merges cleanly, the mention ages out of the --mention-age window on
+        # its own.
+        if [[ "${mergeable}" == CONFLICTING ]]; then
+            emit DEBUG mention.deferred \
+                "mention left outstanding: the branch conflicts with the base branch" \
+                trigger=mention reason=conflicting mergeable="${mergeable}"
+        else
+            emit DEBUG mention.deferred \
+                "mention left outstanding: GitHub has not established whether the branch merges cleanly" \
+                trigger=mention reason=mergeable_unknown mergeable="${mergeable}"
+        fi
+        return 1
     fi
 
     if [[ "${want_request}" == true ]]; then
@@ -2352,10 +2394,11 @@ handle_pr() { # <owner> <name> <base-branch> <pr-json-file>
     local pr_id="" number="" is_draft="" base_ref="" head_oid="" has_review="" \
         pending="" threads="" unresolved="" reviewed_head="" new_work="" \
         basis="" new_count="" new_oid="" new_date="" last_review_at="" \
-        reviewed_oid="" pr_state="" commit_total=""
+        reviewed_oid="" pr_state="" commit_total="" mergeable=""
     IFS=$'\t' read -r pr_id number is_draft base_ref head_oid has_review pending \
         threads unresolved reviewed_head new_work basis new_count new_oid \
-        new_date last_review_at reviewed_oid pr_state commit_total <<<"${decision}"
+        new_date last_review_at reviewed_oid pr_state commit_total \
+        mergeable <<<"${decision}"
 
     ctx_pr="${number}"
 
@@ -2378,7 +2421,8 @@ handle_pr() { # <owner> <name> <base-branch> <pr-json-file>
         reviewed_commit="${reviewed_oid}" last_review_at="${last_review_at}" \
         new_work#="$(bool_json "${new_work}")" basis="${basis}" \
         new_non_merge_count#="${new_count}" commit_total#="${commit_total}" \
-        newest_commit="${new_oid}" newest_authored_at="${new_date}"
+        newest_commit="${new_oid}" newest_authored_at="${new_date}" \
+        mergeable="${mergeable}"
 
     marker="$(marker_key "${owner}" "${name}" "${number}")"
 
@@ -2386,7 +2430,8 @@ handle_pr() { # <owner> <name> <base-branch> <pr-json-file>
     # Returns 1 when it filed a request, which settles the PR for this run.
     local mention_rc=0
     handle_mentions "${pr_id}" "${marker}" \
-        "${head_oid}" "${reviewed_head}" "${pending}" "${file}" || mention_rc=$?
+        "${head_oid}" "${reviewed_head}" "${pending}" "${mergeable}" \
+        "${file}" || mention_rc=$?
     ((mention_rc == 1)) && return
 
     # --- B. automatic requests, gated on draft + base branch ----------------
@@ -2421,6 +2466,30 @@ handle_pr() { # <owner> <name> <base-branch> <pr-json-file>
     if marker_matches "${marker}" "${head_oid}"; then
         emit DEBUG pr.skipped "skipped: already requested for this head commit" \
             reason=already_requested head="${head_oid}"
+        return
+    fi
+    # After the three checks above rather than before them, so this reason means "a
+    # request was prevented here" rather than "and it also does not merge". The three of
+    # them all say a review already exists or was just asked for, which is the more
+    # useful answer when both are true.
+    #
+    # Tested for MERGEABLE rather than against CONFLICTING, so a request needs GitHub to
+    # have positively established that the branch merges. UNKNOWN is not a conflict and
+    # is not the author's to fix - see "Conflicts with the base branch" in README.md -
+    # but it is treated as one here deliberately. Writing the rule this way also fails
+    # closed on any MergeableState value GitHub adds later.
+    if [[ "${mergeable}" != MERGEABLE ]]; then
+        # Two reasons, not one, because the log must not report a conflict on a PR that
+        # has none. A run full of mergeable_unknown is a GitHub problem; a run full of
+        # conflicting is a repository problem.
+        if [[ "${mergeable}" == CONFLICTING ]]; then
+            emit DEBUG pr.skipped "skipped: the branch conflicts with the base branch" \
+                reason=conflicting base="${base_ref}" mergeable="${mergeable}"
+        else
+            emit DEBUG pr.skipped \
+                "skipped: GitHub has not established whether the branch merges cleanly" \
+                reason=mergeable_unknown base="${base_ref}" mergeable="${mergeable}"
+        fi
         return
     fi
 
@@ -2875,7 +2944,7 @@ if [[ -n "${explain_file}" ]]; then
     parse_copilot_logins
     viewer="${VIEWER_LOGIN:-xrplf-bot}"
     MENTION_SINCE="${MENTION_SINCE:-1970-01-01T00:00:00Z}"
-    printf 'id\tnumber\tdraft\tbase\thead\thas_review\tpending\tthreads\tunresolved\treviewed_head\tnew_work\tbasis\tnew_count\tnew_oid\tnew_date\tlast_review\treviewed_oid\tstate\tcommit_total\n'
+    printf 'id\tnumber\tdraft\tbase\thead\thas_review\tpending\tthreads\tunresolved\treviewed_head\tnew_work\tbasis\tnew_count\tnew_oid\tnew_date\tlast_review\treviewed_oid\tstate\tcommit_total\tmergeable\n'
     jq -r "${jq_args[@]}" "${JQ_DECIDE}" "${explain_file}"
     printf -- '--- mentions (id, kind, createdAt, author) ---\n'
     jq -r "${jq_args[@]}" --arg viewer "${viewer}" --arg since "${MENTION_SINCE}" \
