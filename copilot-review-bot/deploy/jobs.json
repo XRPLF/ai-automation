@@ -2,13 +2,13 @@
   "jobs": [
     {
       "repo": "XRPLF/rippled",
-      "ticks_per_hour": 4,
+      "ticks_per_hour": 3,
       "expected_open_prs": 300,
       "max_requests_per_run": 25
     },
     {
       "repo": "XRPLF/xrpld-private",
-      "ticks_per_hour": 4,
+      "ticks_per_hour": 3,
       "expected_open_prs": 65,
       "max_requests_per_run": 25
     }
