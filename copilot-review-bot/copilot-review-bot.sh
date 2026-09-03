@@ -1073,7 +1073,7 @@ last_error() {
 # GitHub reports its secondary rate limit as a 403, so the transient markers
 # are tested first and a 4xx does not veto them. Anything unrecognized is
 # permanent: surfacing an unknown error once, loudly, beats retrying it
-# silently every 15 minutes with nobody any the wiser.
+# silently on every tick with nobody any the wiser.
 classify_failure() { # <raw-error>
     if grep -qiE 'HTTP 5[0-9]{2}|HTTP 429|HTTP 408|rate limit|abuse detection|submitted too quickly|time[d]? ?out|deadline exceeded|connection (reset|refused|closed)|broken pipe|unexpected EOF|\bEOF\b|TLS handshake|tls: |temporary failure in name resolution|no such host|server misbehaving|network is (unreachable|down)|i/o timeout|service unavailable|bad gateway|gateway time' <<<"$1"; then
         printf 'transient'

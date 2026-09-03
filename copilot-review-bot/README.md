@@ -12,8 +12,10 @@ The bot keeps GitHub Copilot reviews flowing on one repository. It requests a Co
 one is due, and waits when one is not. One process watches one repository, so each watched
 repository gets its own.
 
-It is one bash script, driven by `gh` and `jq`, and it runs as a Cloud Run job about every 15
-minutes. There is no webhook receiver and no inbound port. It keeps one small object in a Cloud
+It is one bash script, driven by `gh` and `jq`, and it runs as a Cloud Run job on a periodic tick.
+How often is per job, set by that repository's `ticks_per_hour` in
+[`deploy/jobs.json`](deploy/jobs.json), so a busy repository and a quiet one need not share an
+interval. There is no webhook receiver and no inbound port. It keeps one small object in a Cloud
 Storage bucket between runs. See [State and locking](#state-and-locking).
 
 | Path                          | Purpose                                                                                                                                |
@@ -435,7 +437,7 @@ Two details carry weight:
   permanent, thumb the comment down, and swallow somebody's request forever over a wait of a few
   minutes. Transient markers are therefore tested first.
 * **Anything unrecognized is permanent.** Surfacing an unknown error once, loudly, beats retrying it
-  silently every 15 minutes.
+  silently on every tick.
 
 Set `TRANSIENT_FAILURES_ARE_ERRORS=true` if you would rather a transient failure also failed the run.
 
