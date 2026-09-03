@@ -45,25 +45,8 @@ log="${D}/calls.log"
 
 [[ "${1:-}" == auth ]] && exit 0
 
-# The review request is a gh subcommand, not a GraphQL document, because gh is what
-# knows how to turn @copilot into the node id the mutation needs. Logged with the
-# number and the reviewer, so a case can assert who was asked as well as how often.
-if [[ "${1:-}" == pr && "${2:-}" == edit ]]; then
-    pr_number="$3"
-    reviewer=""
-    while [[ $# -gt 0 ]]; do
-        [[ "$1" == --add-reviewer ]] && reviewer="$2"
-        shift
-    done
-    printf 'request\t%s\t%s\n' "${pr_number}" "${reviewer}" >>"${log}"
-    if [[ -f "${D}/fail-request" ]]; then
-        cat "${D}/fail-request" >&2
-        exit 1
-    fi
-    exit 0
-fi
-
 query=""; number=""; cursor=""; content=""; subject=""; body=""; pr_id=""
+login=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f | -F)
@@ -74,7 +57,8 @@ while [[ $# -gt 0 ]]; do
                 content) content="${2#*=}" ;;
                 subjectId) subject="${2#*=}" ;;
                 body) body="${2#*=}" ;;
-                prId) pr_id="${2#*=}" ;;
+                pullRequestId) pr_id="${2#*=}" ;;
+                login) login="${2#*=}" ;;
             esac
             shift 2
             ;;
@@ -83,6 +67,24 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${query}" in
+    *requestReviewsByLogin*)
+        # Which of the three lists the reviewer travelled in is read back out of the
+        # document, not assumed, because the field name is the half of the request
+        # the bot picks itself. The PR is on the wire as a node id only, so the
+        # number comes back off the id this stub's fixtures build: PR_<number>.
+        field=unknown
+        case "${query}" in
+            *'botLogins: [$login]'*) field=botLogins ;;
+            *'userLogins: [$login]'*) field=userLogins ;;
+            *'teamSlugs: [$login]'*) field=teamSlugs ;;
+        esac
+        printf 'request\t%s\t%s\t%s\n' "${pr_id#PR_}" "${login}" "${field}" >>"${log}"
+        if [[ -f "${D}/fail-request" ]]; then
+            cat "${D}/fail-request" >&2
+            exit 1
+        fi
+        printf '{"data":{"requestReviewsByLogin":{"clientMutationId":null}}}\n'
+        ;;
     *"viewer { login }"*)
         # The identity call is the first thing the bot makes, so both ways it can go
         # wrong have to be reachable: a hard failure and an answer naming nobody.
@@ -446,38 +448,62 @@ assert_eq "logged as an ERROR" 1 "$(events "${d}/out.log" '.event=="review.reque
 assert_eq "the request was attempted once, not twice" 1 "$(calls "${d}/calls.log" request)"
 assert_eq "the failure was logged once, not twice" 1 "$(events "${d}/out.log" '.event=="review.request_failed"')"
 
-printf '\n== the reviewer is asked for by name, with no node id anywhere ==\n'
-# The whole point of using `gh pr edit --add-reviewer` rather than the id-based
-# requestReviews mutation: GitHub's node id for Copilot is GitHub's to change, and a
-# stale one was accepted by that mutation, so the request landed on nothing and the
-# PR sat there looking reviewed-pending forever.
+printf '\n== the reviewer is asked for by login, with no node id anywhere ==\n'
+# GitHub's node id for Copilot is GitHub's to change, and the id-based requestReviews
+# mutation accepts a stale one, so the request would land on nothing and the PR would
+# sit there looking reviewed-pending forever. requestReviewsByLogin takes the login,
+# so nothing here has an id to go stale.
 d="$(scenario reviewer_by_name)"
 page "${d}" first "" 601
 pr_fresh "${d}" pr-601.json
 run "${d}"
 assert_eq "exit status is 0" 0 "${rc}"
-assert_eq "the request went to @copilot, by name" 1 \
-    "$(grep -c $'^request\t601\t@copilot$' "${d}/calls.log")"
+assert_eq "the request went to Copilot's login, in botLogins" 1 \
+    "$(grep -cF "$(printf 'request\t601\tcopilot-pull-request-reviewer[bot]\tbotLogins')" \
+        "${d}/calls.log")"
 assert_eq "no run.start line carries a bot id" 0 \
     "$(events "${d}/out.log" '.bot_id != null')"
-assert_eq "run.start names the reviewer gh was given" 1 \
-    "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="@copilot"')"
+assert_eq "run.start names the reviewer that was sent" 1 \
+    "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="copilot-pull-request-reviewer[bot]"')"
+assert_eq "and the list it was sent in" 1 \
+    "$(events "${d}/out.log" '.event=="run.start" and .reviewer_field=="botLogins"')"
 
-printf '\n== the reviewer reaches gh exactly as configured ==\n'
-# The setting holds what gh wants, so nothing here rewrites it. This is the case that
-# would fail if a '@' rule were ever reintroduced: prefixing would send gh
-# '@monalisa', and stripping would send it 'copilot', which resolves to no account.
-for who in monalisa XRPLF/reviewers 'copilot-pull-request-reviewer[bot]' '@copilot'; do
+printf '\n== each kind of reviewer goes in its own list, verbatim ==\n'
+# requestReviewsByLogin has three lists and the value alone says which one it belongs
+# in, so this is the case that fails if that rule ever drifts: a bot in userLogins, or
+# a team slug split into an owner and a name, is a permanent failure on every due PR.
+# The login itself is never rewritten, so the setting, the log and the wire agree.
+while read -r who field; do
     d="$(scenario "reviewer_$(printf '%s' "${who}" | tr -cd '[:alnum:]')")"
     page "${d}" first "" 701
     pr_fresh "${d}" pr-701.json
     run "${d}" --reviewer "${who}"
     assert_eq "${who}: exit status is 0" 0 "${rc}"
-    assert_eq "${who}: passed through verbatim" 1 \
-        "$(grep -cF "$(printf 'request\t701\t%s' "${who}")" "${d}/calls.log")"
+    assert_eq "${who}: sent verbatim, in ${field}" 1 \
+        "$(grep -cF "$(printf 'request\t701\t%s\t%s' "${who}" "${field}")" "${d}/calls.log")"
     assert_eq "${who}: and logged verbatim" 1 \
-        "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="'"${who}"'"')"
-done
+        "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="'"${who}"'" and .reviewer_field=="'"${field}"'"')"
+done <<'REVIEWERS'
+monalisa userLogins
+XRPLF/reviewers teamSlugs
+copilot-pull-request-reviewer[bot] botLogins
+REVIEWERS
+
+printf '\n== gh'"'"'s @ alias is refused, not rewritten ==\n'
+# '@copilot' was the default while gh made this call, and it is not a login: the
+# mutation would put it in userLogins and GitHub would refuse it once per due PR. It is
+# refused here instead, before any PR is read, with the right spelling in the message.
+d="$(scenario reviewer_at_alias)"
+page "${d}" first "" 703
+pr_fresh "${d}" pr-703.json
+run "${d}" --reviewer '@copilot'
+assert_eq "exit status is 2" 2 "${rc}"
+assert_eq "it says why, and names what was given" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and .reason=="invalid_reviewer" and .given=="@copilot"')"
+assert_eq "the message names the login to use instead" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("copilot-pull-request-reviewer\\[bot\\]"))')"
+assert_eq "no PR was read and no request was filed" 0 \
+    "$(calls "${d}/calls.log" request)"
 
 printf '\n== an empty reviewer is refused once, not per PR ==\n'
 d="$(scenario reviewer_empty)"
@@ -729,7 +755,12 @@ assert_eq "it stopped after the breaker threshold, not once per PR" 2 \
 assert_eq "the halt was reported once, as an ERROR" 1 \
     "$(events "${d}/out.log" '.event=="requests.halted" and .severity=="ERROR"')"
 assert_eq "and it named a remedy" 1 \
-    "$(events "${d}/out.log" '.event=="requests.halted" and .remedy=="check_token_and_copilot_seat"')"
+    "$(events "${d}/out.log" '.event=="requests.halted" and .remedy=="check_role_seat_and_reviewer"')"
+# The reviewer is the third thing that makes a request fail repo-wide, and the only
+# one the operator sets, so the halt carries it rather than making them find the
+# run.start line for the same run.
+assert_eq "and the reviewer it was asking for" 1 \
+    "$(events "${d}/out.log" '.event=="requests.halted" and .reviewer=="copilot-pull-request-reviewer[bot]" and .reviewer_field=="botLogins"')"
 assert_eq "run.done reports the halt" 1 \
     "$(events "${d}/out.log" '.event=="run.done" and .requests_halted==true and .halt_reason=="permanent_failures"')"
 assert_eq "no marker was written for a failed request" 0 \

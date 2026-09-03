@@ -29,11 +29,11 @@
 #                             Storage, which is what Cloud Run needs: its local
 #                             disk does not survive an execution.
 #                             Env: STATE_DIR.
-#       --reviewer NAME       Who to request the review from, spelled exactly as
-#                             `gh pr edit --add-reviewer` wants it. Default:
-#                             @copilot, gh's own special value for the Copilot
-#                             reviewer. A person or team is bare: monalisa,
-#                             myorg/team-name. Env: REVIEWER.
+#       --reviewer NAME       Who to request the review from, as a GitHub login.
+#                             Default: copilot-pull-request-reviewer[bot], the
+#                             Copilot reviewer. A bot keeps the '[bot]' suffix,
+#                             a person is bare (monalisa) and a team is
+#                             owner/slug (myorg/team-name). Env: REVIEWER.
 #       --mention-handle NAME Mention handle without '@'. Default: xrplf-bot.
 #       --mention-age DAYS    Ignore mention comments older than this.
 #                             Default: 7. Keeps a first run from replying to
@@ -99,7 +99,7 @@ if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] ||
     exit 2
 fi
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 
 # ---------------------------------------------------------------------------
 # Configuration (all overridable by environment)
@@ -125,20 +125,25 @@ VERSION="1.3.0"
 # jq is handed it, further down.
 COPILOT_LOGINS="${COPILOT_LOGINS:-copilot-pull-request-reviewer}"
 
-# Who to request the review from, passed to `gh pr edit --add-reviewer` verbatim.
+# Who to request the review from, as the login the requestReviewsByLogin mutation
+# wants. Still a login and not a node id, for the same reason COPILOT_LOGINS is:
+# GitHub owns the id and the login is the stable handle.
 #
-# Stored exactly as gh wants it, so there is no spelling to translate here and the
-# log reports what was really sent. gh documents '@copilot' as its own special value
-# for the Copilot reviewer and resolves it itself, so nothing here needs a node id
-# and a GitHub change to Copilot's account becomes a gh upgrade rather than a patch
-# to this script. Every other reviewer gh takes is a bare login or org/team, which
-# is why the '@' belongs in the value and not in a rule applied to it.
+# The default is Copilot's reviewer bot with the '[bot]' suffix GitHub writes bot
+# logins with, and that suffix is load bearing - see REVIEWER_FIELD below, which uses
+# it to decide which of the mutation's three lists the value belongs in. It is the one
+# spelling difference from COPILOT_LOGINS, which holds what GraphQL *reports* on a Bot
+# node, and that has no suffix.
 #
-# Overridable, so a literal login works if that alias is ever withdrawn. A value
-# containing '@' cannot travel through deploy-job.sh, which joins the job
-# environment with '^@^' - see deploy/rate-budget.sh, which refuses an '@' in any
-# jobs.json string. Nothing per job sets this, so that costs nothing today.
-REVIEWER="${REVIEWER:-@copilot}"
+# Overridable for a person or a team. A value containing '@' cannot travel through
+# deploy-job.sh, which joins the job environment with '^@^' - see
+# deploy/rate-budget.sh, which refuses an '@' in any jobs.json string. Nothing per job
+# sets this, and the '@' forms are refused below anyway, so that costs nothing.
+REVIEWER="${REVIEWER:-copilot-pull-request-reviewer[bot]}"
+
+# Which of requestReviewsByLogin's three lists carries ${REVIEWER}. Settled once, from
+# the setting, by the case statement in the validation section further down.
+REVIEWER_FIELD=""
 
 # Local directory, or gs://bucket with an optional /prefix, and the root rather than
 # the leaf: the repository being watched is appended to it as <owner>/<name>, so any
@@ -209,9 +214,10 @@ LOG_FORMAT="${LOG_FORMAT:-json}"
 MAX_CONSECUTIVE_TRANSIENT="${MAX_CONSECUTIVE_TRANSIENT:-3}"
 
 # The same guard for permanent failures. A permanent error on a review request is
-# almost always repo-wide (the token lost Triage, or Copilot has no seat), so
-# after a couple of them there is nothing to learn from trying the rest of the
-# PRs one 403 at a time. 2 is enough to tell a repo-wide fact from a per-PR one.
+# almost always repo-wide - the account lost Triage, Copilot has no seat, or
+# ${REVIEWER} no longer resolves - so after a couple of them there is nothing to learn
+# from trying the rest of the PRs one refusal at a time. 2 is enough to tell a
+# repo-wide fact from a per-PR one.
 MAX_CONSECUTIVE_PERMANENT="${MAX_CONSECUTIVE_PERMANENT:-2}"
 
 # Consecutive read failures before the sweep is abandoned. Without this a
@@ -596,15 +602,37 @@ require_boolean IGNORE_OUTDATED "${IGNORE_OUTDATED}"
 require_boolean REWRITE_TRIGGERS_REVIEW "${REWRITE_TRIGGERS_REVIEW}"
 require_boolean TRANSIENT_FAILURES_ARE_ERRORS "${TRANSIENT_FAILURES_ARE_ERRORS}"
 require_handle MENTION_HANDLE "${MENTION_HANDLE}"
-# An empty reviewer would make `gh pr edit --add-reviewer ""` the request, which gh
-# rejects per PR rather than once, so every due PR would fail the same way. No format
-# check beyond that, deliberately: a valid override can hold '[', ']' or '/', as in
-# copilot-pull-request-reviewer[bot] and myorg/team-name.
-if [[ -z "${REVIEWER}" ]]; then
-    emit ERROR run.fatal "REVIEWER (--reviewer) must not be empty" \
-        reason=invalid_reviewer
-    exit 2
-fi
+# requestReviewsByLogin takes three separate lists - userLogins, botLogins and
+# teamSlugs - and the mutation itself does not infer which one a login belongs in: the
+# caller has to choose the field. So the choice is settled here, from the shape of the
+# value, once per run rather than once per request, and a value that fits none of the
+# three is refused before any PR is touched. The rules are gh's own, from
+# partitionReviewersByType, because gh made this call until the change described in
+# "Asking Copilot, by name" in README.md, so a value that worked then works now.
+case "${REVIEWER}" in
+    "")
+        # Empty would otherwise reach GitHub as an empty list, which requests nobody
+        # and still reports success, once per due PR, forever.
+        emit ERROR run.fatal "REVIEWER (--reviewer) must not be empty" \
+            reason=invalid_reviewer
+        exit 2
+        ;;
+    @*)
+        # '@copilot' was gh's alias for the Copilot reviewer and the old default here.
+        # The mutation has no notion of it. Refused rather than rewritten, so the
+        # setting, the log and the wire all stay the same string.
+        emit ERROR run.fatal \
+            "REVIEWER (--reviewer) is a login, not gh's '@' alias: write 'copilot-pull-request-reviewer[bot]' for Copilot, not '${REVIEWER}'" \
+            reason=invalid_reviewer given="${REVIEWER}"
+        exit 2
+        ;;
+    # A '/' can only be a team, and the mutation wants it as owner/slug.
+    */*) REVIEWER_FIELD=teamSlugs ;;
+    # Quoted, so the brackets are a literal suffix and not a character class. This is
+    # how GitHub spells a bot login, and the mutation requires the suffix.
+    *'[bot]') REVIEWER_FIELD=botLogins ;;
+    *) REVIEWER_FIELD=userLogins ;;
+esac
 # --pr reaches the log as a raw JSON number, so a non-numeric value would emit a
 # line no JSON parser accepts, losing the severity and labels of the one event
 # that reports the failure.
@@ -944,6 +972,29 @@ mutation($subjectId: ID!, $body: String!) {
   }
 }'
 
+# The review request. By login, not by node id: GitHub owns Copilot's id, and the
+# id-based `requestReviews` accepts any well-formed one, so a stale id succeeds, files
+# the request against an account that reviews nothing, and leaves the PR looking
+# reviewed-pending forever. A login that stops resolving is an error instead.
+#
+# REVIEWER_FIELD is substituted in, because the three kinds of reviewer are three
+# separate input fields rather than one polymorphic list. It is one of three keywords
+# settled at startup from the setting, never anything read from GitHub, and the login
+# itself travels as a GraphQL variable, so nothing GitHub-supplied reaches the
+# document.
+#
+# union: true adds to the reviewer set. The alternative replaces it, which is what gh
+# did, and that needs the current reviewers read first and drops a human reviewer on
+# any race between the read and the write.
+M_REQUEST_REVIEW='
+mutation($pullRequestId: ID!, $login: String!) {
+  requestReviewsByLogin(input: {pullRequestId: $pullRequestId,
+                                REVIEWER_FIELD: [$login],
+                                union: true}) {
+    clientMutationId
+  }
+}'
+
 # ---------------------------------------------------------------------------
 # GitHub helpers
 # ---------------------------------------------------------------------------
@@ -1034,27 +1085,6 @@ gh_graphql() { # <query> [gh args...]
     return "${rc}"
 }
 
-# A plain gh subcommand, for the one thing raw GraphQL is the wrong tool for:
-# requesting Copilot's review. Same stream handling as gh_graphql, and for the same
-# reason - anything gh writes to stderr while still exiting 0 would otherwise be
-# read back as part of its output.
-# Reached only through mutate, never called directly.
-# shellcheck disable=SC2329
-gh_run() { # <gh args...>
-    local out rc=0 err
-    err="${TMPDIR_RUN:-${TMPDIR:-/tmp}}/gh-stderr"
-    out="$("${GH_TIMEOUT_PREFIX[@]}" gh "$@" 2>"${err}")" || rc=$?
-    if ((rc == 0)); then
-        printf '%s' "${out}"
-        return 0
-    fi
-    ((rc == 124)) && printf 'gh timed out after %ss. ' "${GH_TIMEOUT}"
-    # gh puts its diagnosis on stderr, so that is the half worth keeping. stdout
-    # first anyway, because a partial write before the failure explains it.
-    printf '%s %s' "${out}" "$(tr '\n' ' ' <"${err}" 2>/dev/null || true)"
-    return "${rc}"
-}
-
 # Read-only query with a small retry, since a scheduled job should ride out a
 # blip rather than skip a cycle.
 gql() {
@@ -1099,7 +1129,6 @@ mutate() { # <caller-function> [caller args...]
 }
 
 gql_mutate() { mutate gh_graphql "$@"; }
-gh_mutate() { mutate gh_run "$@"; }
 
 # Squeeze a gh/GraphQL failure into one line, keeping any status code or
 # error type so it can be reported back on the PR.
@@ -1933,8 +1962,11 @@ marker_write() { # <key> <head-oid>
 # that gets applied is a permanent record of a decision that may not be.
 REQUEST_ERROR=""
 REQUEST_CLASS=""
-request_review() { # <owner> <name> <pr-number>
-    local owner="$1" name="$2" number="$3"
+# The PR is named by its node id and nothing else, because that is all the mutation
+# takes: the repository is implicit in the id, and the number is already on every
+# event through ctx_pr.
+request_review() { # <pr-id>
+    local pr_id="$1"
     REQUEST_ERROR=""
     REQUEST_CLASS=""
 
@@ -1962,17 +1994,11 @@ request_review() { # <owner> <name> <pr-number>
     # Counted before the call, so a failure consumes the budget too.
     request_attempts=$((request_attempts + 1))
 
-    # gh rather than a raw mutation, because requesting a review from a bot needs
-    # the account's node id and gh is the thing that already knows how to get it:
-    # @copilot is its documented alias, and it resolves it through
-    # requestReviewsByLogin. Nothing here stores an id, so a GitHub change to
-    # Copilot's account is a gh upgrade rather than a patch to this script.
-    #
-    # --add-reviewer, not a replacing call: it is additive by definition, so a PR's
-    # human reviewers are left alone. It also re-requests somebody who has already
-    # reviewed, which is the entire point of this bot.
-    if gh_mutate pr edit "${number}" --repo "${owner}/${name}" \
-        --add-reviewer "${REVIEWER}"; then
+    # One mutation, carrying a login and no node id for the reviewer, additive rather
+    # than replacing. See M_REQUEST_REVIEW for each of those three choices, and
+    # "Asking Copilot, by name" in README.md for why this is not `gh pr edit`.
+    if gql_mutate "${M_REQUEST_REVIEW/REVIEWER_FIELD/${REVIEWER_FIELD}}" \
+        -f pullRequestId="${pr_id}" -f login="${REVIEWER}"; then
         requests_made=$((requests_made + 1))
         consecutive_transients=0
         consecutive_permanents=0
@@ -2005,10 +2031,11 @@ request_review() { # <owner> <name> <pr-number>
         requests_halted=true
         halt_reason=permanent_failures
         emit ERROR requests.halted \
-            "halting review requests for this run after consecutive permanent failures; this is usually the token losing the Triage role, or Copilot having no seat on the repo, rather than anything about these PRs" \
+            "halting review requests for this run after consecutive permanent failures; this is usually the account losing the Triage role, Copilot having no seat on the repo, or ${REVIEWER} no longer resolving, rather than anything about these PRs" \
             consecutive_permanent_failures#="${consecutive_permanents}" \
             threshold#="${MAX_CONSECUTIVE_PERMANENT}" \
-            error="${REQUEST_ERROR}" remedy=check_token_and_copilot_seat
+            reviewer="${REVIEWER}" reviewer_field="${REVIEWER_FIELD}" \
+            error="${REQUEST_ERROR}" remedy=check_role_seat_and_reviewer
     fi
     return 1
 }
@@ -2198,9 +2225,9 @@ mention_writes_exhausted() {
 #    request was attempted for it - falling through would file it twice and burn
 #    another slot - or the mention scan itself failed, or the request was deferred or
 #    failed transiently and the next run should see the mention as outstanding.
-handle_mentions() { # <owner> <name> <number> <pr-id> <marker> <head-oid> <reviewed-head> <pending> <file>
-    local owner="$1" name="$2" number="$3" pr_id="$4" marker="$5" head_oid="$6" \
-        reviewed_head="$7" pending="$8" file="$9"
+handle_mentions() { # <pr-id> <marker> <head-oid> <reviewed-head> <pending> <file>
+    local pr_id="$1" marker="$2" head_oid="$3" \
+        reviewed_head="$4" pending="$5" file="$6"
     local mentions="" attempted=false result=""
     local jq_err="${TMPDIR_RUN}/jq-error"
     # Guarded like the decision above: an unguarded assignment propagates a jq
@@ -2227,7 +2254,7 @@ handle_mentions() { # <owner> <name> <number> <pr-id> <marker> <head-oid> <revie
 
     if [[ "${want_request}" == true ]]; then
         local rc=0
-        request_review "${owner}" "${name}" "${number}" || rc=$?
+        request_review "${pr_id}" || rc=$?
         report_request_outcome "${rc}" mention "${marker}" "${head_oid}" \
             handle="${MENTION_HANDLE}" head="${head_oid}" || true
         case "${rc}" in
@@ -2358,7 +2385,7 @@ handle_pr() { # <owner> <name> <base-branch> <pr-json-file>
     # --- A. mention handling, on every open PR ------------------------------
     # Returns 1 when it filed a request, which settles the PR for this run.
     local mention_rc=0
-    handle_mentions "${owner}" "${name}" "${number}" "${pr_id}" "${marker}" \
+    handle_mentions "${pr_id}" "${marker}" \
         "${head_oid}" "${reviewed_head}" "${pending}" "${file}" || mention_rc=$?
     ((mention_rc == 1)) && return
 
@@ -2436,7 +2463,7 @@ handle_pr() { # <owner> <name> <base-branch> <pr-json-file>
     # reason it was due rides along as attributes on whichever outcome event
     # fires, so one event fully describes one decision.
     local rc=0
-    request_review "${owner}" "${name}" "${number}" || rc=$?
+    request_review "${pr_id}" || rc=$?
     report_request_outcome "${rc}" schedule "${marker}" "${head_oid}" \
         reason="${why_code}" \
         detail="${why}" \
@@ -2990,7 +3017,7 @@ warn_if_state_is_ephemeral
 
 emit INFO run.start "copilot-review-bot starting" \
     version="${VERSION}" viewer="${viewer}" dry_run#="${dry_run}" \
-    reviewer="${REVIEWER}" \
+    reviewer="${REVIEWER}" reviewer_field="${REVIEWER_FIELD}" \
     handle="${MENTION_HANDLE}" mention_since="${MENTION_SINCE}" \
     repo="${owner}/${name}" max_requests#="${MAX_REQUESTS_PER_RUN}" \
     rewrite_triggers_review#="${REWRITE_TRIGGERS_REVIEW}" \

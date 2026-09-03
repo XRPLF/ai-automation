@@ -28,10 +28,11 @@
 #   Q_PR       (one PR, in full)  2 points
 #   { viewer { login } }          1 point, once per run
 #
-# The review request is `gh pr edit --add-reviewer`, which is a PR lookup plus the
-# requestReviewsByLogin mutation, so it is charged at 3 points here. That is the
-# pessimistic end of a 2-3 range and it has not been measured, because measuring it
-# means filing a real review request.
+# The review request is one requestReviewsByLogin mutation, so it is almost certainly
+# 1 point, but it has never been measured: measuring it means filing a real review
+# request. It stays charged at 3, which is what it cost while the bot ran `gh pr edit`
+# and paid for a PR lookup as well. Left high on purpose - the whole model is an upper
+# bound, and unmeasured headroom is worth more here than a tighter number.
 #
 # A mention write (addReaction or addComment) is one mutation, charged at 1 and
 # counted at the bot's own MAX_MENTION_WRITES_PER_RUN cap. Charging the cap rather
