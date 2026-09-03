@@ -576,6 +576,22 @@ require_handle() { # <name> <value>
         "a GitHub login with no leading '@' (letters, digits and hyphens only)"
 }
 
+# True when <login> is one of the comma separated COPILOT_LOGINS. The comparison is
+# is_copilot's: case insensitive, with blanks around a separator ignored and empty
+# entries dropped. Pure shell rather than jq, so the answer is available while options
+# are still being validated, which is before require_binaries has run.
+names_copilot() { # <login>
+    local want="${1,,}" entry
+    local -a entries=()
+    IFS=',' read -ra entries <<<"${COPILOT_LOGINS}"
+    for entry in "${entries[@]}"; do
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -n "${entry}" && "${entry,,}" == "${want}" ]] && return 0
+    done
+    return 1
+}
+
 require_integer MAX_REQUESTS_PER_RUN "${MAX_REQUESTS_PER_RUN}"
 require_integer MAX_MENTION_WRITES_PER_RUN "${MAX_MENTION_WRITES_PER_RUN}"
 require_integer MENTION_MAX_AGE_DAYS "${MENTION_MAX_AGE_DAYS}"
@@ -621,8 +637,17 @@ case "${REVIEWER}" in
         # '@copilot' was gh's alias for the Copilot reviewer and the old default here.
         # The mutation has no notion of it. Refused rather than rewritten, so the
         # setting, the log and the wire all stay the same string.
+        #
+        # What to write instead depends on which '@' value this is. Only the alias
+        # resolves to Copilot; anything else is an ordinary login somebody prefixed out
+        # of habit, and telling them to write Copilot's login would be wrong twice.
+        if [[ "${REVIEWER,,}" == @copilot ]]; then
+            reviewer_fix="write 'copilot-pull-request-reviewer[bot]' for Copilot"
+        else
+            reviewer_fix="write '${REVIEWER#@}'"
+        fi
         emit ERROR run.fatal \
-            "REVIEWER (--reviewer) is a login, not gh's '@' alias: write 'copilot-pull-request-reviewer[bot]' for Copilot, not '${REVIEWER}'" \
+            "REVIEWER (--reviewer) is a login, not gh's '@' alias: ${reviewer_fix}, not '${REVIEWER}'" \
             reason=invalid_reviewer given="${REVIEWER}"
         exit 2
         ;;
@@ -631,7 +656,19 @@ case "${REVIEWER}" in
     # Quoted, so the brackets are a literal suffix and not a character class. This is
     # how GitHub spells a bot login, and the mutation requires the suffix.
     *'[bot]') REVIEWER_FIELD=botLogins ;;
-    *) REVIEWER_FIELD=userLogins ;;
+    *)
+        # A Copilot login spelled without the suffix reaches this arm, and userLogins is
+        # where GitHub refuses it: once per due PR, until MAX_CONSECUTIVE_PERMANENT
+        # halts the run. That is the per-PR failure this whole path exists to avoid, so
+        # it is refused here instead, naming the suffix rather than the field.
+        if names_copilot "${REVIEWER}"; then
+            emit ERROR run.fatal \
+                "REVIEWER (--reviewer) is '${REVIEWER}', which COPILOT_LOGINS names as Copilot, but the mutation needs the bot suffix: write '${REVIEWER}[bot]'" \
+                reason=invalid_reviewer given="${REVIEWER}" setting=REVIEWER
+            exit 2
+        fi
+        REVIEWER_FIELD=userLogins
+        ;;
 esac
 # --pr reaches the log as a raw JSON number, so a non-numeric value would emit a
 # line no JSON parser accepts, losing the severity and labels of the one event
@@ -1036,7 +1073,7 @@ last_error() {
 # GitHub reports its secondary rate limit as a 403, so the transient markers
 # are tested first and a 4xx does not veto them. Anything unrecognized is
 # permanent: surfacing an unknown error once, loudly, beats retrying it
-# silently every 15 minutes with nobody any the wiser.
+# silently on every tick with nobody any the wiser.
 classify_failure() { # <raw-error>
     if grep -qiE 'HTTP 5[0-9]{2}|HTTP 429|HTTP 408|rate limit|abuse detection|submitted too quickly|time[d]? ?out|deadline exceeded|connection (reset|refused|closed)|broken pipe|unexpected EOF|\bEOF\b|TLS handshake|tls: |temporary failure in name resolution|no such host|server misbehaving|network is (unreachable|down)|i/o timeout|service unavailable|bad gateway|gateway time' <<<"$1"; then
         printf 'transient'

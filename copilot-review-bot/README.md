@@ -12,8 +12,10 @@ The bot keeps GitHub Copilot reviews flowing on one repository. It requests a Co
 one is due, and waits when one is not. One process watches one repository, so each watched
 repository gets its own.
 
-It is one bash script, driven by `gh` and `jq`, and it runs as a Cloud Run job about every 15
-minutes. There is no webhook receiver and no inbound port. It keeps one small object in a Cloud
+It is one bash script, driven by `gh` and `jq`, and it runs as a Cloud Run job on a periodic tick.
+How often is per job, set by that repository's `ticks_per_hour` in
+[`deploy/jobs.json`](deploy/jobs.json), so a busy repository and a quiet one need not share an
+interval. There is no webhook receiver and no inbound port. It keeps one small object in a Cloud
 Storage bucket between runs. See [State and locking](#state-and-locking).
 
 | Path                          | Purpose                                                                                                                                |
@@ -318,9 +320,18 @@ belongs in, so `--reviewer` is classified once at startup and sent verbatim:
 | `monalisa`                           | `userLogins` | Anything else.                                                                 |
 | `myorg/team-name`                    | `teamSlugs`  | A `/`, which can only be a team. Sent as `owner/slug`, not split.              |
 | `@copilot`                           | -            | **Refused**, exit 2, `reason=invalid_reviewer`. It is gh's alias, not a login. |
+| `copilot-pull-request-reviewer`      | -            | **Refused**, exit 2. Named by `COPILOT_LOGINS`, but missing the suffix.        |
 
 The `@` forms are refused rather than rewritten, so the setting, the `reviewer` field on `run.start`
-and the string on the wire are always the same.
+and the string on the wire are always the same. The message names the spelling that works, and which
+one that is depends on the value: `@copilot` is told to write Copilot's login, while any other `@`
+value is told to drop the `@`, since the alias is the only one that means Copilot.
+
+**A Copilot login without `[bot]` is refused too**, and it is the case worth having a guard for. It
+would otherwise classify as `userLogins`, which GitHub refuses once per due PR until
+`MAX_CONSECUTIVE_PERMANENT` halts the run: the exact per-PR failure this path exists to remove,
+surviving for one spelling. The check reads `COPILOT_LOGINS` rather than a hardcoded name, so it
+follows that setting, and a login outside the list is still an ordinary user.
 
 The suffix is the one place this differs from `COPILOT_LOGINS`, which holds `copilot-pull-request-reviewer`
 with no suffix: that variable holds what GraphQL *reports* on a `Bot` node, while `--reviewer` holds
@@ -426,7 +437,7 @@ Two details carry weight:
   permanent, thumb the comment down, and swallow somebody's request forever over a wait of a few
   minutes. Transient markers are therefore tested first.
 * **Anything unrecognized is permanent.** Surfacing an unknown error once, loudly, beats retrying it
-  silently every 15 minutes.
+  silently on every tick.
 
 Set `TRANSIENT_FAILURES_ARE_ERRORS=true` if you would rather a transient failure also failed the run.
 
