@@ -26,9 +26,9 @@ keep up with it.
 
 ## Tools
 
-| Tool               | What it does                                                                                                                                                                                                                                                                                                                            | Read next                                                    |
-|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
-| copilot-review-bot | Uses the `@xrplf-bot` account to request a GitHub Copilot review on a PR, but only when one is due. It waits for Copilot's earlier review threads to be resolved, and for a commit that is demonstrably new work. It runs as one Cloud Run job per watched repository, every 15 minutes, and keeps its state in a Cloud Storage bucket. | [copilot-review-bot/README.md](copilot-review-bot/README.md) |
+| Tool               | What it does                                                                                                                                                                                                                                                                                                                                | Read next                                                    |
+|--------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
+| copilot-review-bot | Uses the `@xrplf-bot` account to request a GitHub Copilot review on a PR, but only when one is due. It waits for Copilot's earlier review threads to be resolved, and for a commit that is demonstrably new work. It runs as one Cloud Run job per watched repository, polling periodically, and keeps its state in a Cloud Storage bucket. | [copilot-review-bot/README.md](copilot-review-bot/README.md) |
 
 ## Where to start
 
