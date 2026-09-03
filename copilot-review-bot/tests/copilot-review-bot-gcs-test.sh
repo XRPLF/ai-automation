@@ -323,13 +323,6 @@ D="${FAKE_DIR}"
 log="${D}/calls.log"
 [[ "${1:-}" == auth ]] && exit 0
 
-# The review request is a gh subcommand, not a GraphQL document: gh is what turns
-# @copilot into the node id the mutation needs, so nothing here handles ids.
-if [[ "${1:-}" == pr && "${2:-}" == edit ]]; then
-    printf 'request\t%s\n' "$3" >>"${log}"
-    exit 0
-fi
-
 query=""; number=""; pr_id=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -337,7 +330,7 @@ while [[ $# -gt 0 ]]; do
             case "${2%%=*}" in
                 query) query="${2#*=}" ;;
                 number) number="${2#*=}" ;;
-                prId) pr_id="${2#*=}" ;;
+                pullRequestId) pr_id="${2#*=}" ;;
             esac
             shift 2
             ;;
@@ -345,13 +338,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 case "${query}" in
+    # This suite is about the state bucket, so the request only has to be counted.
+    # The PR reaches it as a node id, and this stub serves exactly one PR.
+    *requestReviewsByLogin*)
+        printf 'request\t%s\n' "${pr_id#PR_}" >>"${log}"
+        printf '{"data":{"requestReviewsByLogin":{"clientMutationId":null}}}\n' ;;
     *"viewer { login }"*) printf 'xrplf-bot\n' ;;
     *"pullRequests(states: OPEN"*)
         printf 'list\n' >>"${log}"
         printf '{"data":{"repository":{"defaultBranchRef":{"name":"develop"},"pullRequests":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"number":42}]}}}}\n' ;;
     *reviewThreads*)
         printf 'pr\t%s\n' "${number}" >>"${log}"
-        printf '{"data":{"repository":{"pullRequest":{"id":"PR_42","number":42,"isDraft":false,"baseRefName":"develop","headRefOid":"head1","commits":{"nodes":[{"commit":{"oid":"head1","authoredDate":"2026-08-01T10:00:00Z","committedDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}]}}}}}\n' ;;
+        printf '{"data":{"repository":{"pullRequest":{"id":"PR_42","number":42,"isDraft":false,"baseRefName":"develop","headRefOid":"head1","mergeable":"MERGEABLE","commits":{"nodes":[{"commit":{"oid":"head1","authoredDate":"2026-08-01T10:00:00Z","committedDate":"2026-08-01T10:00:00Z","parents":{"totalCount":1}}}]}}}}}\n' ;;
     *) printf 'stub gh: unexpected query\n' >&2; exit 1 ;;
 esac
 exit 0
@@ -607,8 +605,8 @@ assert_eq "the bucket is named and a remedy given" 1 \
 assert_eq "the 403 is reported" 1 "$(events "${ROOT}/out.log" '.http_status=="403"')"
 
 printf '\n== the bucket holds the markers and nothing else ==\n'
-# One object, not two. The reviewer is resolved by name on every request, so nothing
-# else needs storing.
+# One object, not two. The reviewer travels as a login on every request, so there is
+# no node id to cache and nothing else needs storing.
 control "force?name=${PREFIX}/lock&status=200" >/dev/null
 run -v
 assert_eq "exit status is 0" 0 "${rc}"

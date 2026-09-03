@@ -45,25 +45,8 @@ log="${D}/calls.log"
 
 [[ "${1:-}" == auth ]] && exit 0
 
-# The review request is a gh subcommand, not a GraphQL document, because gh is what
-# knows how to turn @copilot into the node id the mutation needs. Logged with the
-# number and the reviewer, so a case can assert who was asked as well as how often.
-if [[ "${1:-}" == pr && "${2:-}" == edit ]]; then
-    pr_number="$3"
-    reviewer=""
-    while [[ $# -gt 0 ]]; do
-        [[ "$1" == --add-reviewer ]] && reviewer="$2"
-        shift
-    done
-    printf 'request\t%s\t%s\n' "${pr_number}" "${reviewer}" >>"${log}"
-    if [[ -f "${D}/fail-request" ]]; then
-        cat "${D}/fail-request" >&2
-        exit 1
-    fi
-    exit 0
-fi
-
 query=""; number=""; cursor=""; content=""; subject=""; body=""; pr_id=""
+login=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f | -F)
@@ -74,7 +57,8 @@ while [[ $# -gt 0 ]]; do
                 content) content="${2#*=}" ;;
                 subjectId) subject="${2#*=}" ;;
                 body) body="${2#*=}" ;;
-                prId) pr_id="${2#*=}" ;;
+                pullRequestId) pr_id="${2#*=}" ;;
+                login) login="${2#*=}" ;;
             esac
             shift 2
             ;;
@@ -83,6 +67,24 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${query}" in
+    *requestReviewsByLogin*)
+        # Which of the three lists the reviewer travelled in is read back out of the
+        # document, not assumed, because the field name is the half of the request
+        # the bot picks itself. The PR is on the wire as a node id only, so the
+        # number comes back off the id this stub's fixtures build: PR_<number>.
+        field=unknown
+        case "${query}" in
+            *'botLogins: [$login]'*) field=botLogins ;;
+            *'userLogins: [$login]'*) field=userLogins ;;
+            *'teamSlugs: [$login]'*) field=teamSlugs ;;
+        esac
+        printf 'request\t%s\t%s\t%s\n' "${pr_id#PR_}" "${login}" "${field}" >>"${log}"
+        if [[ -f "${D}/fail-request" ]]; then
+            cat "${D}/fail-request" >&2
+            exit 1
+        fi
+        printf '{"data":{"requestReviewsByLogin":{"clientMutationId":null}}}\n'
+        ;;
     *"viewer { login }"*)
         # The identity call is the first thing the bot makes, so both ways it can go
         # wrong have to be reachable: a hard failure and an answer naming nobody.
@@ -182,11 +184,15 @@ page() { # <dir> <cursor-name> <next-cursor-or-empty> <numbers...>
                 nodes:($nums|map({number:.}))}}}}' >"${d}/page-${name}.json"
 }
 
-# A PR nobody has reviewed, so it is due for one.
+# A PR nobody has reviewed, so it is due for one. mergeable is part of "due": a request
+# needs MERGEABLE, so a fixture without it would be skipped for mergeability and every
+# case here would be testing the wrong thing. Pass {"mergeable":...} to override it,
+# including to null, which is how the absent-field path is reached.
 pr_fresh() { # <dir> <file-name> [extra-json]
     local d="$1" f="$2" extra="${3:-{\}}"
     jq -n --argjson extra "${extra}" '{
         isDraft:false, baseRefName:"develop", headRefOid:"head1",
+        mergeable:"MERGEABLE",
         author:{login:"alice"},
         commits:{nodes:[{commit:{oid:"head1",
             authoredDate:"2026-08-01T10:00:00Z",
@@ -446,38 +452,121 @@ assert_eq "logged as an ERROR" 1 "$(events "${d}/out.log" '.event=="review.reque
 assert_eq "the request was attempted once, not twice" 1 "$(calls "${d}/calls.log" request)"
 assert_eq "the failure was logged once, not twice" 1 "$(events "${d}/out.log" '.event=="review.request_failed"')"
 
-printf '\n== the reviewer is asked for by name, with no node id anywhere ==\n'
-# The whole point of using `gh pr edit --add-reviewer` rather than the id-based
-# requestReviews mutation: GitHub's node id for Copilot is GitHub's to change, and a
-# stale one was accepted by that mutation, so the request landed on nothing and the
-# PR sat there looking reviewed-pending forever.
+printf '\n== the reviewer is asked for by login, with no node id anywhere ==\n'
+# GitHub's node id for Copilot is GitHub's to change, and the id-based requestReviews
+# mutation accepts a stale one, so the request would land on nothing and the PR would
+# sit there looking reviewed-pending forever. requestReviewsByLogin takes the login,
+# so nothing here has an id to go stale.
 d="$(scenario reviewer_by_name)"
 page "${d}" first "" 601
 pr_fresh "${d}" pr-601.json
 run "${d}"
 assert_eq "exit status is 0" 0 "${rc}"
-assert_eq "the request went to @copilot, by name" 1 \
-    "$(grep -c $'^request\t601\t@copilot$' "${d}/calls.log")"
+assert_eq "the request went to Copilot's login, in botLogins" 1 \
+    "$(grep -cF "$(printf 'request\t601\tcopilot-pull-request-reviewer[bot]\tbotLogins')" \
+        "${d}/calls.log")"
 assert_eq "no run.start line carries a bot id" 0 \
     "$(events "${d}/out.log" '.bot_id != null')"
-assert_eq "run.start names the reviewer gh was given" 1 \
-    "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="@copilot"')"
+assert_eq "run.start names the reviewer that was sent" 1 \
+    "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="copilot-pull-request-reviewer[bot]"')"
+assert_eq "and the list it was sent in" 1 \
+    "$(events "${d}/out.log" '.event=="run.start" and .reviewer_field=="botLogins"')"
 
-printf '\n== the reviewer reaches gh exactly as configured ==\n'
-# The setting holds what gh wants, so nothing here rewrites it. This is the case that
-# would fail if a '@' rule were ever reintroduced: prefixing would send gh
-# '@monalisa', and stripping would send it 'copilot', which resolves to no account.
-for who in monalisa XRPLF/reviewers 'copilot-pull-request-reviewer[bot]' '@copilot'; do
+printf '\n== each kind of reviewer goes in its own list, verbatim ==\n'
+# requestReviewsByLogin has three lists and the value alone says which one it belongs
+# in, so this is the case that fails if that rule ever drifts: a bot in userLogins, or
+# a team slug split into an owner and a name, is a permanent failure on every due PR.
+# The login itself is never rewritten, so the setting, the log and the wire agree.
+while read -r who field; do
     d="$(scenario "reviewer_$(printf '%s' "${who}" | tr -cd '[:alnum:]')")"
     page "${d}" first "" 701
     pr_fresh "${d}" pr-701.json
     run "${d}" --reviewer "${who}"
     assert_eq "${who}: exit status is 0" 0 "${rc}"
-    assert_eq "${who}: passed through verbatim" 1 \
-        "$(grep -cF "$(printf 'request\t701\t%s' "${who}")" "${d}/calls.log")"
+    assert_eq "${who}: sent verbatim, in ${field}" 1 \
+        "$(grep -cF "$(printf 'request\t701\t%s\t%s' "${who}" "${field}")" "${d}/calls.log")"
     assert_eq "${who}: and logged verbatim" 1 \
-        "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="'"${who}"'"')"
-done
+        "$(events "${d}/out.log" '.event=="run.start" and .reviewer=="'"${who}"'" and .reviewer_field=="'"${field}"'"')"
+done <<'REVIEWERS'
+monalisa userLogins
+XRPLF/reviewers teamSlugs
+copilot-pull-request-reviewer[bot] botLogins
+REVIEWERS
+
+printf '\n== gh'"'"'s @ alias is refused, not rewritten ==\n'
+# '@copilot' was the default while gh made this call, and it is not a login: the
+# mutation would put it in userLogins and GitHub would refuse it once per due PR. It is
+# refused here instead, before any PR is read, with the right spelling in the message.
+d="$(scenario reviewer_at_alias)"
+page "${d}" first "" 703
+pr_fresh "${d}" pr-703.json
+run "${d}" --reviewer '@copilot'
+assert_eq "exit status is 2" 2 "${rc}"
+assert_eq "it says why, and names what was given" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and .reason=="invalid_reviewer" and .given=="@copilot"')"
+assert_eq "the message names the login to use instead" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("copilot-pull-request-reviewer\\[bot\\]"))')"
+assert_eq "no PR was read and no request was filed" 0 \
+    "$(calls "${d}/calls.log" request)"
+
+printf '\n== and any other @ value is told to drop the @, not to write Copilot ==\n'
+# The alias is the only '@' value that means Copilot. Suggesting Copilot's login for
+# '@monalisa' would answer a question nobody asked, so the fix offered is the same
+# string without the prefix, which is what the operator meant.
+d="$(scenario reviewer_at_user)"
+page "${d}" first "" 704
+pr_fresh "${d}" pr-704.json
+run "${d}" --reviewer '@monalisa'
+assert_eq "exit status is 2" 2 "${rc}"
+assert_eq "it names what was given" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and .reason=="invalid_reviewer" and .given=="@monalisa"')"
+assert_eq "the fix offered is the login without the @" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("write .monalisa."))')"
+assert_eq "and Copilot is not suggested for somebody else" 0 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("copilot-pull-request-reviewer"))')"
+
+printf '\n== a Copilot login without the bot suffix is refused at startup ==\n'
+# This is the one spelling that classified as a user and reached GitHub, which refused
+# it once per due PR until the breaker halted the run. That is the per-PR failure the
+# whole requestReviewsByLogin path exists to remove, so it fails once, before any PR.
+while read -r who; do
+    d="$(scenario "reviewer_nosuffix_$(printf '%s' "${who}" | tr -cd '[:alnum:]')")"
+    page "${d}" first "" 705
+    pr_fresh "${d}" pr-705.json
+    run "${d}" --reviewer "${who}"
+    assert_eq "${who}: exit status is 2" 2 "${rc}"
+    assert_eq "${who}: refused as an invalid reviewer" 1 \
+        "$(events "${d}/out.log" '.event=="run.fatal" and .reason=="invalid_reviewer" and .given=="'"${who}"'"')"
+    assert_eq "${who}: the message names the suffixed spelling" 1 \
+        "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("write .'"${who}"'\\[bot\\]."))')"
+    assert_eq "${who}: no PR was read and no request was filed" 0 \
+        "$(calls "${d}/calls.log" request)"
+done <<'NOSUFFIX'
+copilot-pull-request-reviewer
+Copilot-Pull-Request-Reviewer
+NOSUFFIX
+
+printf '\n== the check follows COPILOT_LOGINS, not a hardcoded spelling ==\n'
+# COPILOT_LOGINS is the list of logins that count as Copilot, and it is configurable, so
+# the guard has to read it rather than know one name. A login outside the list is an
+# ordinary user and must still be accepted.
+d="$(scenario reviewer_nosuffix_custom)"
+page "${d}" first "" 706
+pr_fresh "${d}" pr-706.json
+RUN_ENV=(COPILOT_LOGINS='house-reviewer,other-bot')
+run "${d}" --reviewer 'house-reviewer'
+assert_eq "a login named by COPILOT_LOGINS is refused" 2 "${rc}"
+assert_eq "and the suffix is named for that login" 1 \
+    "$(events "${d}/out.log" '.event=="run.fatal" and (.message | test("write .house-reviewer\\[bot\\]."))')"
+
+d="$(scenario reviewer_user_still_ok)"
+page "${d}" first "" 707
+pr_fresh "${d}" pr-707.json
+RUN_ENV=(COPILOT_LOGINS=house-reviewer)
+run "${d}" --reviewer 'monalisa'
+assert_eq "a login outside the list is still a user" 0 "${rc}"
+assert_eq "and it went out in userLogins" 1 \
+    "$(grep -cF "$(printf 'request\t707\tmonalisa\tuserLogins')" "${d}/calls.log")"
 
 printf '\n== an empty reviewer is refused once, not per PR ==\n'
 d="$(scenario reviewer_empty)"
@@ -511,7 +600,7 @@ page "${d}" first C1 "${batch1[@]}"
 page "${d}" C1 C2 "${batch2[@]}"
 page "${d}" C2 "" "${batch3[@]}"
 # Drafts, so all 320 are inspected and none is acted on.
-jq -n '{isDraft:true, baseRefName:"develop", headRefOid:"head1",
+jq -n '{isDraft:true, baseRefName:"develop", headRefOid:"head1", mergeable:"MERGEABLE",
         commits:{nodes:[{commit:{oid:"head1",authoredDate:"2026-08-01T10:00:00Z",
         committedDate:"2026-08-01T10:00:00Z",parents:{totalCount:1}}}]}}' >"${d}/pr-any.json"
 run "${d}"
@@ -643,6 +732,77 @@ for case_name in already_reviewed pending; do
         "$(events "${d}/out.log" ".event==\"mention.no_action\" and .reason==\"${want_reason}\"")"
 done
 
+printf '\n== a mention on a conflicting PR is held, not answered ==\n'
+# The one case where a mention gets no reaction at all. A conflict is the author's to
+# fix and the ask was never served, so a reaction would close it permanently and lose
+# it. Left unreacted, the next run sees the mention still outstanding and honors it as
+# soon as the conflict clears, with nobody asking twice.
+d="$(scenario mention_conflicting)"
+page "${d}" first "" 203
+pr_fresh "${d}" pr-203.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"CONFLICTING"}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "no request was filed" 0 "$(calls "${d}/calls.log" request)"
+assert_eq "and no reaction was written, so the mention stays outstanding" 0 \
+    "$(calls "${d}/calls.log" react)"
+assert_eq "it said the mention is being held, and why" 1 \
+    "$(events "${d}/out.log" '.event=="mention.deferred" and .reason=="conflicting"')"
+# The automatic path would reach the same conclusion, so reporting it twice for one PR
+# would make two events out of one decision.
+assert_eq "the automatic skip did not also fire for the same PR" 0 \
+    "$(events "${d}/out.log" '.event=="pr.skipped"')"
+
+printf '\n== and an unestablished merge state holds it the same way ==\n'
+# Same hold, different reason. The asker is told nothing either way, so the log is the
+# only place the difference shows, and it is the difference between "GitHub did not
+# answer" and "this branch conflicts".
+d="$(scenario mention_mergeable_unknown)"
+page "${d}" first "" 206
+pr_fresh "${d}" pr-206.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"UNKNOWN"}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "no request was filed" 0 "$(calls "${d}/calls.log" request)"
+assert_eq "and no reaction was written" 0 "$(calls "${d}/calls.log" react)"
+assert_eq "held under its own reason, not as a conflict" 1 \
+    "$(events "${d}/out.log" '.event=="mention.deferred" and .reason=="mergeable_unknown"')"
+
+printf '\n== unless Copilot already reviewed it, which answers the ask ==\n'
+# Both true at once: the branch conflicts and the head is already reviewed. The asker
+# has their review, so the comment is answered rather than held. Holding it would leave
+# a served request outstanding until it aged out, on a conflict nobody may ever fix.
+d="$(scenario mention_conflicting_reviewed)"
+page "${d}" first "" 205
+pr_fresh "${d}" pr-205.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"CONFLICTING",
+        reviews:{nodes:[{submittedAt:"2026-08-02T10:00:00Z",
+            author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
+            commit:{oid:"head1"}}]}}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "no request was filed" 0 "$(calls "${d}/calls.log" request)"
+assert_eq "the mention got eyes, not silence" 1 \
+    "$(grep -c 'react.*IC_1.*EYES' "${d}/calls.log")"
+assert_eq "and the reason is the review, not the conflict" 1 \
+    "$(events "${d}/out.log" '.event=="mention.no_action" and .reason=="already_reviewed_head"')"
+assert_eq "so nothing was held" 0 \
+    "$(events "${d}/out.log" '.event=="mention.deferred"')"
+
+printf '\n== and it is honored once the conflict clears ==\n'
+# Same mention, same PR, conflict resolved. Nothing about the comment changed, so this
+# is the case that fails if a reaction is ever written above.
+d="$(scenario mention_conflict_cleared)"
+page "${d}" first "" 204
+pr_fresh "${d}" pr-204.json \
+    "$(jq -n --argjson a "${MENTION}" '$a * {mergeable:"MERGEABLE"}')"
+run "${d}" --verbose
+assert_eq "exit status is 0" 0 "${rc}"
+assert_eq "the request was filed on the strength of the old mention" 1 \
+    "$(calls "${d}/calls.log" request)"
+assert_eq "and the mention got its thumbs up" 1 \
+    "$(grep -c 'react.*IC_1.*THUMBS_UP' "${d}/calls.log")"
+
 # ===========================================================================
 printf '\n== every automatic skip guard actually stops the request ==\n'
 # The decision-rule suite proves the jq fields. These prove the guards act on
@@ -674,6 +834,36 @@ skip_case unresolved unresolved_threads "$(jq -n \
     reviewThreads:{nodes:[{isResolved:false,isOutdated:false,
         opener:{nodes:[{author:{__typename:"Bot",login:"copilot-pull-request-reviewer"}}]},
         comments:{nodes:[]}}]}}')"
+skip_case conflicting conflicting '{"mergeable":"CONFLICTING"}'
+# UNKNOWN stops a request too, but under its own reason, because the log must not claim
+# a conflict on a PR that has none. A run full of mergeable_unknown is GitHub failing to
+# answer; a run full of conflicting is the repository's state.
+skip_case mergeable_unknown mergeable_unknown '{"mergeable":"UNKNOWN"}'
+# No field at all is the same case: it is what --explain gets from a capture taken before
+# the field was selected, and it reads as UNKNOWN rather than as a missing gate.
+skip_case mergeable_absent mergeable_unknown '{"mergeable":null}'
+
+# MERGEABLE is the only value that files a request. This is the positive control for the
+# whole gate: written as "not MERGEABLE", one wrong value here stops every request on the
+# repository, and it stops them the way a healthy quiet run looks.
+d="$(scenario mergeable_yes)"
+page "${d}" first "" 303
+pr_fresh "${d}" pr-303.json '{"mergeable":"MERGEABLE"}'
+run "${d}" --verbose
+assert_eq "MERGEABLE: the request is filed" 1 "$(calls "${d}/calls.log" request)"
+assert_eq "MERGEABLE: and nothing was skipped for mergeability" 0 \
+    "$(events "${d}/out.log" '.event=="pr.skipped" and (.reason=="conflicting" or .reason=="mergeable_unknown")')"
+
+# A value GitHub has not invented yet. The gate has to fail closed on it: an unknown
+# fourth state is exactly the case where requesting on an unverified merge is worst.
+d="$(scenario mergeable_future_value)"
+page "${d}" first "" 305
+pr_fresh "${d}" pr-305.json '{"mergeable":"SOMETHING_NEW"}'
+run "${d}" --verbose
+assert_eq "an unrecognized mergeable value stops the request" 0 \
+    "$(calls "${d}/calls.log" request)"
+assert_eq "and is reported as unknown, not as a conflict" 1 \
+    "$(events "${d}/out.log" '.event=="pr.skipped" and .reason=="mergeable_unknown" and .mergeable=="SOMETHING_NEW"')"
 
 # A User account is not the reviewer bot even when its login is the bot's, so its
 # review must not suppress anything. The login matches the list on purpose: __typename
@@ -695,7 +885,7 @@ printf '\n== a re-review is requested once new work lands ==\n'
 d="$(scenario new_work)"
 page "${d}" first "" 303
 jq -n '{
-    isDraft:false, baseRefName:"develop", headRefOid:"head2",
+    isDraft:false, baseRefName:"develop", headRefOid:"head2", mergeable:"MERGEABLE",
     reviews:{nodes:[{submittedAt:"2026-08-02T10:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
         commit:{oid:"head1"}}]},
@@ -729,7 +919,12 @@ assert_eq "it stopped after the breaker threshold, not once per PR" 2 \
 assert_eq "the halt was reported once, as an ERROR" 1 \
     "$(events "${d}/out.log" '.event=="requests.halted" and .severity=="ERROR"')"
 assert_eq "and it named a remedy" 1 \
-    "$(events "${d}/out.log" '.event=="requests.halted" and .remedy=="check_token_and_copilot_seat"')"
+    "$(events "${d}/out.log" '.event=="requests.halted" and .remedy=="check_role_seat_and_reviewer"')"
+# The reviewer is the third thing that makes a request fail repo-wide, and the only
+# one the operator sets, so the halt carries it rather than making them find the
+# run.start line for the same run.
+assert_eq "and the reviewer it was asking for" 1 \
+    "$(events "${d}/out.log" '.event=="requests.halted" and .reviewer=="copilot-pull-request-reviewer[bot]" and .reviewer_field=="botLogins"')"
 assert_eq "run.done reports the halt" 1 \
     "$(events "${d}/out.log" '.event=="run.done" and .requests_halted==true and .halt_reason=="permanent_failures"')"
 assert_eq "no marker was written for a failed request" 0 \
@@ -855,7 +1050,7 @@ d="$(scenario logins_spaced)"
 page "${d}" first "" 508
 # Copilot has reviewed the head commit, so the run is only due a request if the
 # reviewer's login failed to match, which is what the list here decides.
-jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"head1",
+jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"head1", mergeable:"MERGEABLE",
         commits:{nodes:[{commit:{oid:"head1",authoredDate:"2026-08-01T10:00:00Z",
             committedDate:"2026-08-01T10:00:00Z",parents:{totalCount:1}}}]},
         reviews:{nodes:[{author:{login:"Some-Copilot",__typename:"Bot"},
@@ -1118,7 +1313,7 @@ printf '\n== the remaining basis arms are spelled out in the log ==\n'
 d="$(scenario basis_authored)"
 page "${d}" first "" 751
 jq -n '{
-    isDraft:false, baseRefName:"develop", headRefOid:"new1",
+    isDraft:false, baseRefName:"develop", headRefOid:"new1", mergeable:"MERGEABLE",
     reviews:{nodes:[{submittedAt:"2026-08-02T10:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
         commit:{oid:"gone1"}}]},
@@ -1135,7 +1330,7 @@ assert_eq "and the basis is recorded as authored" 1 \
 d="$(scenario basis_rewritten)"
 page "${d}" first "" 752
 jq -n '{
-    isDraft:false, baseRefName:"develop", headRefOid:"new2",
+    isDraft:false, baseRefName:"develop", headRefOid:"new2", mergeable:"MERGEABLE",
     reviews:{nodes:[{submittedAt:"2026-08-10T10:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},
         commit:{oid:"gone2"}}]},
@@ -1401,6 +1596,9 @@ assert_eq "the request went out" 1 "$(calls "${d}/calls.log" request)"
 assert_eq "the repository was never listed" 0 "$(calls "${d}/calls.log" list)"
 
 printf '\n== --pr reports a repository it cannot read ==\n'
+# The PR is there to serve, so nothing here is missing and the repository read is the
+# only thing that fails. The last assertion is what earns that fixture: it pins the bot
+# stopping before a PR it could have fetched, which is the whole claim of the case.
 d="$(scenario pr_repo_unreadable)"
 pr_fresh "${d}" pr-844.json
 printf 'HTTP 404: Could not resolve to a Repository\n' >"${d}/fail-page-first"
@@ -1410,6 +1608,8 @@ assert_eq "it reported the repository read, not the PR" 1 \
     "$(events "${d}/out.log" '.event=="repo.read_failed"')"
 assert_eq "and diagnosed the access failure" 1 \
     "$(events "${d}/out.log" '.event=="access.denied"')"
+assert_eq "and the PR was never fetched, though it was there to fetch" 0 \
+    "$(calls "${d}/calls.log" pr)"
 
 # ===========================================================================
 printf '\n== a --base that no PR targets is called out, not silently ignored ==\n'
@@ -1581,7 +1781,7 @@ printf '\n== a branch refreshed from base only is left alone ==\n'
 # end to end. Pulling the base branch in must never trigger a review.
 d="$(scenario merge_only)"
 page "${d}" first "" 981
-jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"merge1",
+jq -n '{isDraft:false, baseRefName:"develop", headRefOid:"merge1", mergeable:"MERGEABLE",
     author:{login:"alice"},
     reviews:{nodes:[{submittedAt:"2026-08-02T00:00:00Z",
         author:{__typename:"Bot",login:"copilot-pull-request-reviewer"},

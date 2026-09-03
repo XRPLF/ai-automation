@@ -13,9 +13,11 @@
 # job-config.sh, which deploy-job.sh sources too, because a fleet this check charges for has
 # to be the fleet that then gets deployed.
 #
-# The quota is 5000 points per hour and it is per *token*, not per job, per repo or
-# per schedule. Every Cloud Run job uses the same gh-token, so adding a repo spends
-# somebody else's budget. Reads then start failing part way through a run: each one is
+# The quota is 5000 points per hour and it is per *account*, not per token, per job,
+# per repo or per schedule. Every token issued for one account draws on that single
+# budget, so a second token for the same account buys nothing. Every Cloud Run job uses
+# the same gh-token, so adding a repo spends somebody else's budget. Reads then start
+# failing part way through a run: each one is
 # an ERROR `pr.read_failed`, and after MAX_CONSECUTIVE_READ_FAILURES in a row the run
 # stops with `reason=read_failures`, leaving the remaining pull requests for the next
 # run. Nothing about one job's own configuration reveals that it is the cause.
@@ -28,10 +30,11 @@
 #   Q_PR       (one PR, in full)  2 points
 #   { viewer { login } }          1 point, once per run
 #
-# The review request is `gh pr edit --add-reviewer`, which is a PR lookup plus the
-# requestReviewsByLogin mutation, so it is charged at 3 points here. That is the
-# pessimistic end of a 2-3 range and it has not been measured, because measuring it
-# means filing a real review request.
+# The review request is one requestReviewsByLogin mutation, so it is almost certainly
+# 1 point, but it has never been measured: measuring it means filing a real review
+# request. It stays charged at 3, which is what it cost while the bot ran `gh pr edit`
+# and paid for a PR lookup as well. Left high on purpose - the whole model is an upper
+# bound, and unmeasured headroom is worth more here than a tighter number.
 #
 # A mention write (addReaction or addComment) is one mutation, charged at 1 and
 # counted at the bot's own MAX_MENTION_WRITES_PER_RUN cap. Charging the cap rather
@@ -46,11 +49,11 @@ SUITE_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "${SUITE_DIR}/job-config.sh"
 JOBS="${1:-${SUITE_DIR}/jobs.json}"
 
-# GitHub's hourly GraphQL quota for one token.
+# GitHub's hourly GraphQL quota for one account.
 QUOTA="${QUOTA:-5000}"
 # Warn here rather than at the ceiling. A deployment that lands at 99% is one busy
 # week away from dropping PRs, and the lead time on the remedy (lengthening a
-# schedule, or a second token) is longer than that.
+# schedule, or a token for a second account) is longer than that.
 WARN_PERCENT="${WARN_PERCENT:-80}"
 
 POINTS_LIST_CALL=1
@@ -292,7 +295,7 @@ printf '%s\n' "${rows[@]}"
 printf '%-40s %-24s %-20s %6s %8s %9s\n' TOTAL "" "" "" "" "${total}"
 printf '%s\n' "${machine[@]}"
 printf 'budget\tTOTAL\t\t\t%s\n' "${total}"
-printf '\nquota %s points/hour per token, used %s (%s%%)\n' \
+printf '\nquota %s points/hour per account, used %s (%s%%)\n' \
     "${QUOTA}" "${total}" "$((total * 100 / QUOTA))"
 
 if ((total >= QUOTA)); then
@@ -300,13 +303,14 @@ if ((total >= QUOTA)); then
 
 REFUSING: ${total} points/hour exceeds the ${QUOTA}/hour GraphQL quota.
 
-The quota is per token and every job shares gh-token, so this would make reads fail
+The quota is per account and every job shares gh-token, so this would make reads fail
 part way through a run. Each failure is an ERROR pr.read_failed, and after three in a
 row the run stops with reason=read_failures, leaving the rest for the next run.
 
 Lengthen a schedule (*/30 halves a job's share), lower expected_open_prs if it is
-overstated, or give a job its own token. Raising max_requests_per_run will not
-help: almost all of the cost is reads.
+overstated, or give a job a token for a second account. Another token for the same
+account adds no quota. Raising max_requests_per_run will not help: almost all of the
+cost is reads.
 EOF
     exit 1
 fi

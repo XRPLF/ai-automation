@@ -8,8 +8,7 @@ What the bot decides, and why, is in [../README.md](../README.md). How to test a
 [../tests/README.md](../tests/README.md). `run`, `tick`, `execution`, `fleet` and `state root` each
 mean one thing throughout: see [Words used here](../README.md#words-used-here). In the commands
 below, `<job>` is a `name` from [`jobs.json`](jobs.json) and `<owner>/<name>` is the repository that
-job watches. Substitute both. Nothing here names a particular one, because `jobs.json` is the only
-list of them.
+job watches. Substitute both.
 
 **Setting this up for the first time?** Start at [Set it up from scratch](#set-it-up-from-scratch),
 which puts the eight steps in order and links to the section that explains each one.
@@ -53,9 +52,9 @@ Everything in this directory belongs to that one tool, which is why it sits insi
 ## The pieces
 
 | Piece             | Name                                                                       | Purpose                                                                                                                                                                                                                                               |
-|-------------------|----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ----------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Job list          | [`jobs.json`](jobs.json)                                                   | Which repositories are watched, on what schedule. The source of truth: CI brings every listed job into line with it on every push. A job *removed* from the list is not deleted. See [Removing an entry](#removing-an-entry-does-not-remove-the-job). |
-| Cloud Run job     | `copilot-review-bot-<owner>-<name>`                                        | One bot run per execution, in `us-central1`. One task, no retries. See [Configuration](#configuration).                                                                                                                                               |
+| Cloud Run job     | `copilot-review-bot-<owner>-<name>`                                        | One bot run per execution, in `us-central1`. One task, no retries.                                                                                                                                                                                    |
 | Cloud Scheduler   | `copilot-review-bot-<owner>-<name>-tick`                                   | Executes its job on the schedule in `jobs.json`.                                                                                                                                                                                                      |
 | Secret Manager    | `gh-token`                                                                 | The bot account's GitHub PAT, injected as `GH_TOKEN`.                                                                                                                                                                                                 |
 | Cloud Storage     | `xrplf-copilot-review-bot-state`                                           | The lock and the head-commit markers, under `<owner>/<name>/`.                                                                                                                                                                                        |
@@ -65,7 +64,7 @@ Everything in this directory belongs to that one tool, which is why it sits insi
 ### Files in this directory
 
 | File             | Purpose                                                                                                                                     |
-|------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Dockerfile`     | The runtime image, with the bot baked in. Built from the tool directory, not from this one, because both `COPY` paths are relative to that. |
 | `entrypoint.sh`  | Maps the job's environment onto the bot's flags, and passes `--args` through.                                                               |
 | `jobs.json`      | Which repositories are watched, on what schedule. The source of truth.                                                                      |
@@ -88,29 +87,25 @@ flowchart LR
 ```
 
 **The image is the whole deployment.** The bot is baked into it, so what CI built is what runs.
-Nothing is fetched at run time, which means three things:
-
-* The runtime needs no read access to this repository, so the token only needs the watched
-  repositories. See [Identities and permissions](#identities-and-permissions).
-* The job cannot execute code that did not go through CI.
-* An execution starts with no network round trip of its own.
+Nothing is fetched at run time, so the job cannot execute code that did not go through CI, an
+execution starts with no network round trip of its own, and the runtime needs no read access to this
+repository at all, only to the watched repositories.
 
 `docker build` is uncached, and the jobs are pinned to the image **digest**, never to a tag, so the
 deployed image cannot change under them. CI asserts the match: the `test` job compares `sha256sum`
 of `/app/copilot-review-bot.sh` inside the image against the working tree, and refuses to ship if
 they differ.
 
-That guarantee is about the **bot**, not the whole image. Nothing in the Dockerfile is
-version-pinned, so two builds of one commit can carry different tool versions. The `sha256sum` gate
-is what makes the bot itself traceable to a commit. `ship` also pushes `:<commit-sha>` and
-`:latest`. Nothing in production reads either, and `:latest` exists only for the one-time bootstrap
-build in [First-time provisioning](#first-time-provisioning-the-gcp-commands).
+That guarantee is about the **bot**, not the whole image; nothing in the Dockerfile is
+version-pinned, so two builds of one commit can carry different tool versions. `ship` also pushes
+`:<commit-sha>` and `:latest`. Nothing in production reads either; `:latest` exists only for the
+one-time bootstrap build in [First-time provisioning](#first-time-provisioning-the-gcp-commands).
 
 ## Identities and permissions
 
 Everything this tool needs access to, in one place: the GitHub token, the three GCP service
 accounts, and how GitHub Actions reaches GCP. The commands that grant all of it are in [First-time
-provisioning](#first-time-provisioning-the-gcp-commands). This section is what to read first.
+provisioning](#first-time-provisioning-the-gcp-commands).
 
 ```mermaid
 flowchart LR
@@ -130,42 +125,39 @@ flowchart LR
 ### GitHub token
 
 The token in `gh-token` needs access to **each watched repository only**, and never to
-`XRPLF/ai-automation`. Nothing at run time reads this repository, as [How a change reaches
-production](#how-a-change-reaches-production) explains.
+`XRPLF/ai-automation`, since nothing at run time reads this repository.
 
 | Token type       | Scopes                                                                                                                                                                                                                                                                          |
-|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Fine-grained PAT | `Pull requests: Read and write` to request reviews and post the error comments. `Contents: Read` so a commit's parents can be read, which is how a merge commit is told from real work. `Issues: Read and write` for the reactions. `Metadata: Read` is attached automatically. |
 | Classic PAT      | `repo`, or `public_repo` if every watched repository is public.                                                                                                                                                                                                                 |
 
-A fine-grained PAT is deny-by-default even for public repositories, so each watched repository has
-to be added to it explicitly.
+A fine-grained PAT is deny-by-default even for public repositories, so each watched repository has to
+be added to it explicitly.
 
-`Issues: Read and write`, not `Issues: Read`, because the bot reacts to PR *conversation* comments
-as well as inline review comments. GitHub's fine-grained permission reference lists `POST
-/repos/{owner}/{repo}/issues/comments/{id}/reactions` only under `Issues`, with no alternative.
-Reading those comments needs no `Issues` permission at all, so the gap shows up only when the bot
-tries to react. It then logs `reaction.failed` at `ERROR` and exits 1, which is loud but does not
-say "grant Issues". Because the reaction *is* the bookkeeping, a missing scope makes the bot answer
-the same mention on every run until the `--mention-age` window closes.
+`Issues: Read and write`, not `Issues: Read`, because the bot reacts to PR *conversation* comments as
+well as inline review comments, and GitHub only exposes the reaction endpoint under `Issues`. Reading
+those comments needs no `Issues` permission at all, so the gap shows up only when the bot tries to
+react: `reaction.failed` at `ERROR`, exit 1. Because the reaction *is* the bookkeeping, a missing
+scope makes the bot answer the same mention on every run until the `--mention-age` window closes.
 
 Two more requirements are both silent failure modes if missed:
 
-* The account behind the token needs at least the **Triage** repository role. That is the floor
-  GitHub requires for requesting a review from a human collaborator, and Copilot occupies the same
-  "Reviewers" slot. Read-only access covers the monitoring half of the bot but not the mutation that
-  files the request. A role without write leaves the request returning 403 even where the role would
-  otherwise allow it.
-* The account must separately hold a **Copilot license or seat** for the repository. Without one,
-  the request is filed and never acted on. That is indistinguishable from the bot succeeding and
-  Copilot ignoring it, because that is exactly what happens.
+* The account behind the token needs at least the **Triage** repository role, the floor GitHub
+  requires for requesting a review, since Copilot occupies the same "Reviewers" slot as a human
+  collaborator. Triage is also the *ceiling* the bot needs: **Write is not required**. It was,
+  briefly, while the bot ran `gh pr edit`, which sends a second no-op mutation that GitHub refuses
+  without push access. See [Asking Copilot, by name](../README.md#asking-copilot-by-name).
+* The account must separately hold a **Copilot license or seat** for the repository. Without one, the
+  request is filed and never acted on, indistinguishable from the bot succeeding and Copilot ignoring
+  it.
 
-**Currently a classic PAT, wider than the bot needs.** `gh-token` predates the scopes above. The old
-entrypoint cloned `XRPLF/ai-automation` on every tick, which needed repository-wide access, so a
-classic PAT was the only fit. Nothing clones that repository now, so a fine-grained PAT scoped to
-the watched repositories is enough. Swapping it is a Secret Manager change with no code change. See
-[Rotate the token](#rotate-the-token). Its blast radius until then is every repository the account
-can see.
+**`gh-token` is currently a classic PAT, wider than the bot needs.** It predates the scopes above: the
+old entrypoint cloned `XRPLF/ai-automation` on every tick, which needed repository-wide access, so a
+classic PAT was the only fit. Nothing clones that repository now, so a fine-grained PAT scoped to the
+watched repositories is enough, and swapping it is a Secret Manager change with no code change. See
+[Rotate the token](#rotate-the-token). Until then its blast radius is every repository the account can
+see.
 
 **The token has an expiry and nothing in this repository tracks it.** When it expires, every tick
 fails at the first read with `event=repo.list_failed`, which diagnoses the token itself. Record the
@@ -176,23 +168,17 @@ expiry date and the owning account somewhere with a calendar attached, and rotat
 Three accounts, each scoped to what it alone needs.
 
 | Account             | Used by                                                                       | Roles                                                                                                                                                                                              |
-|---------------------|-------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bot-runtime`       | The Cloud Run job itself, at every tick                                       | `secretmanager.secretAccessor` on `gh-token`, `storage.objectAdmin` on the state bucket                                                                                                            |
 | `scheduler-invoker` | Cloud Scheduler, to trigger the job                                           | `run.invoker`, at project level, because a per-job binding cannot be created before the job exists                                                                                                 |
 | `deployer`          | GitHub Actions, through Workload Identity Federation, with no stored GCP keys | `artifactregistry.writer`, `run.developer`, `cloudscheduler.admin`, `iam.serviceAccountUser` on `bot-runtime` and on `scheduler-invoker`, `iam.workloadIdentityUser` scoped to this one repository |
 
-`bot-runtime` and `scheduler-invoker` never leave GCP. The job's service account is attached at
-creation, and Cloud Scheduler assumes its own invoker to call the job, so nothing outside GCP ever
-holds their credentials. `deployer` is the one account anything outside GCP can act as, which is why
-its trust is scoped as tightly as [GitHub Actions](#github-actions) describes.
+`bot-runtime` and `scheduler-invoker` never leave GCP; their credentials are never held outside it.
+`deployer` is the one account anything outside GCP can act as, which is why its trust is scoped as
+tightly as [GitHub Actions](#github-actions) describes.
 
 The bucket grant is `objectAdmin` rather than `objectCreator` because the bot deletes as well as
-writes: it removes the lock on release and prunes stale markers. A create-only role lets a run take
-the lock and never give it back.
-
-The reasoning for the other less obvious grant lives in the comments beside the commands in
-[First-time provisioning](#first-time-provisioning-the-gcp-commands): why two roles sit at project
-level rather than per job.
+writes: it removes the lock on release and prunes stale markers.
 
 ### GitHub Actions
 
@@ -204,21 +190,19 @@ repository.
 
 Two conditions bound who can reach that trust, and both have to hold:
 
-* **The workload identity pool provider's attribute condition**, which restricts the OIDC exchange
-  to `assertion.repository == 'XRPLF/ai-automation' && assertion.ref == 'refs/heads/main'`. Without
-  it, the trust would extend to every GitHub Actions workflow on every tenant, because GitHub uses
-  one OIDC issuer for all of GitHub. See [Verifying the OIDC trust](#verifying-the-oidc-trust) for
-  how to check the live value rather than assume it still matches this.
+* **The workload identity pool provider's attribute condition**, which restricts the OIDC exchange to
+  `assertion.repository == 'XRPLF/ai-automation' && assertion.ref == 'refs/heads/main'`. Without it,
+  the trust would extend to every GitHub Actions workflow on every tenant, since GitHub uses one OIDC
+  issuer for all of GitHub. See [Verifying the OIDC trust](#verifying-the-oidc-trust).
 * **A ruleset on `main`** requiring a pull request review before merge. The attribute condition only
-  says "this repository, this branch". It does not say "only through review". The ruleset is what
-  stops anyone with write access from putting arbitrary code into production on the next merge,
-  given that `deploy` runs as `bot-runtime` with `gh-token` attached.
+  says "this repository, this branch"; the ruleset is what stops anyone with write access from
+  putting arbitrary code into production on the next merge, given that `deploy` runs as `bot-runtime`
+  with `gh-token` attached.
 
 `ship` and `deploy` also gate on `github.event_name == 'push' && github.ref == 'refs/heads/main'` in
-the workflow file itself, so a pull request and a manual dispatch get the tests and nothing that can
-reach GCP. That `if:` is a second, narrower gate, not a replacement for the two above. A change to
-the workflow file alone could widen it, which is exactly what the attribute condition and the
-ruleset are there to stop.
+the workflow file itself. That `if:` is a second, narrower gate, not a replacement for the two above;
+a change to the workflow file alone could widen it, which is exactly what the attribute condition and
+the ruleset are there to stop.
 
 ## Add or change a watched repository
 
@@ -226,31 +210,30 @@ Add an entry to [`jobs.json`](jobs.json) and merge. CI creates the Cloud Run job
 and pins both to the new image. There is no `gcloud` step.
 
 **A field name is its environment variable, lowercased.** `max_requests_per_run` sets
-`MAX_REQUESTS_PER_RUN`, `lock_ttl_minutes` sets `LOCK_TTL_MINUTES`, and so on for all seven that
-reach the bot that way, so the field tells you which variable to look up in [the bot's
-options](../README.md#options). The exceptions are the three that configure the platform rather than
-the bot: `ticks_per_hour`, `offset_minutes`, `task_timeout` and `memory` become `gcloud` flags or a
-derived value. Note that a field does **not** always match the bot's command-line flag, which is
-deliberately shorter in three cases.
+`MAX_REQUESTS_PER_RUN`, `lock_ttl_minutes` sets `LOCK_TTL_MINUTES`, and so on for every field that
+reaches the bot that way, so the field tells you which variable to look up in [the bot's
+options](../README.md#options). The exceptions are the fields that configure the platform rather
+than the bot (`ticks_per_hour`, `offset_minutes`, `task_timeout`, `memory`), which become `gcloud`
+flags or a derived value instead.
 
 ```json
 {
-  "repo": "XRPLF/clio",
+  "repo": "owner/name",
   "ticks_per_hour": 4,
   "expected_open_prs": 60,
   "max_requests_per_run": 10
 }
 ```
 
-Four fields, and neither the job name nor the cron is one of them. Both are derived by
-[`job-config.sh`](job-config.sh), which `rate-budget.sh` and `deploy-job.sh` both source so that the
-fleet the budget check charges for is the fleet that gets deployed.
+Neither the job name nor the cron is a field; both are derived by [`job-config.sh`](job-config.sh),
+which `rate-budget.sh` and `deploy-job.sh` both source so that the fleet the budget check charges for
+is the fleet that gets deployed.
 
 | Field                        | Required | Meaning                                                                                                                                                                                                        |
-|------------------------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `repo`                       | yes      | The single repository this job watches, as `owner/name`. **Must be unique**, and everything else here is derived from it. See below.                                                                           |
+| ---------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repo`                       | yes      | The single repository this job watches, as `owner/name`. **Must be unique**, and everything else here is derived from it.                                                                                      |
 | `ticks_per_hour`             | yes      | How often the tick fires. Must divide 60 evenly: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60. This is the number the budget is charged on.                                                                      |
-| `offset_minutes`             | no       | Minutes past the hour for the first tick, 0 to 59. Defaults to a value derived from `repo`, which is what staggers the fleet. See below.                                                                       |
+| `offset_minutes`             | no       | Minutes past the hour for the first tick, 0 to 59. Defaults to a value derived from `repo`, which staggers the fleet.                                                                                          |
 | `name`                       | no       | Cloud Run job name, and its tick is this plus `-tick`. Derived from `repo` unless given. Set it only when the derived name will not do. See below.                                                             |
 | `expected_open_prs`          | yes      | How many open PRs to charge the quota at. **Every** open PR, not just the ones a review could be requested on. Not a measurement and not a cap. Err high. See [When the count drifts](#when-the-count-drifts). |
 | `max_requests_per_run`       | yes      | Review requests per run. Required, so it cannot differ from what the budget check charges for.                                                                                                                 |
@@ -262,8 +245,12 @@ fleet the budget check charges for is the fleet that gets deployed.
 | `run_deadline_seconds`       | no       | Default 900.                                                                                                                                                                                                   |
 | `memory`                     | no       | Default `512Mi`.                                                                                                                                                                                               |
 
-[`rate-budget.sh`](rate-budget.sh) validates all of this before anything is built. It also asserts
-the one relationship that matters:
+**No string value here may contain an `@`.** `deploy-job.sh` joins the environment with `^@^`, so the
+delimiter cannot appear inside a value. `rate-budget.sh` refuses any string field that holds one,
+naming the field, rather than letting it corrupt the job's environment at deploy time.
+
+[`rate-budget.sh`](rate-budget.sh) validates all of this before anything is built, and asserts one
+relationship that matters:
 
 **`run_deadline_seconds` < `task_timeout` < `lock_ttl_minutes`**
 
@@ -273,26 +260,22 @@ lock then blocks the schedule until its TTL expires.
 
 ### The job name is derived, not declared
 
-`copilot-review-bot-<owner>-<name>`, lowercased, so for example `XRPLF/rippled` gives
-`copilot-review-bot-xrplf-rippled`. Nothing states it in `jobs.json`, which is what stops it
-disagreeing with the repository it watches.
+`copilot-review-bot-<owner>-<name>`, lowercased. Nothing states it in `jobs.json`, which is what
+stops it disagreeing with the repository it watches. The owner is in the name because it is the only
+thing that keeps two organizations apart.
 
-The owner is in the name because it is the only thing that keeps two organizations apart. Two
-repositories sharing a `<name>` under different owners would otherwise want one job name.
-
-Cloud Run takes only lowercase letters, digits and hyphens, so `.` and `_` fold to `-`. That folding
-is not reversible: `a-b/c` and `a/b-c` both give `a-b-c`. `rate-budget.sh` therefore checks
+Cloud Run takes only lowercase letters, digits and hyphens, so `.` and `_` fold to `-`, and that
+folding is not reversible: `a-b/c` and `a/b-c` both give `a-b-c`. `rate-budget.sh` therefore checks
 uniqueness on the *derived* name, and refuses a fleet where two entries collide.
 
 Set `name` explicitly for the two cases the derivation cannot serve: a collision like that, or an
 owner and repository long enough to exceed the Cloud Run name limit. An explicit name still has to
-carry the `copilot-review-bot` prefix, because every alert filter is a prefix match on it.
+carry the `copilot-review-bot` prefix, since every alert filter is a prefix match on it.
 
-**Changing `repo` does not rename anything in GCP.** `deploy-job.sh` reconciles by job name, so a
-new one creates a new job and a new tick and leaves the old pair untouched. The old tick keeps
-firing on whatever image it last had, and because the state path comes from the `repo` field rather
-than the `name` field, the two contend for one lock object and one of them sits out every tick.
-Delete the old pair by hand, immediately after the merge:
+**Changing `repo` does not rename anything in GCP.** `deploy-job.sh` reconciles by job name, so a new
+one creates a new job and a new tick and leaves the old pair untouched, still ticking on whatever
+image it last had. Because the state path comes from the `repo` field rather than the `name` field,
+the two also contend for one lock object. Delete the old pair by hand, immediately after the merge:
 
 ```bash
 gcloud scheduler jobs delete <old-name>-tick --location us-central1 \
@@ -302,33 +285,24 @@ gcloud run jobs delete <old-name> --region us-central1 --project xrplf-automatio
 
 ### The ticks stagger themselves
 
-`ticks_per_hour` says how often, and `offset_minutes` says where in the hour the first one falls.
-The cron is built from the two, so `4` and `3` become `3,18,33,48 * * * *`.
+`ticks_per_hour` says how often, and `offset_minutes` says where in the hour the first one falls; the
+cron is built from the two. Leave `offset_minutes` out and it is derived from `repo`, spreading the
+fleet without anybody choosing minutes by hand, and keyed on the repository rather than on position
+in `jobs.json` so inserting or removing an entry never moves anybody else's tick.
 
-Leave `offset_minutes` out and it is derived from `repo`, which spreads the fleet without anybody
-choosing minutes by hand. Two jobs at four ticks an hour land on different minutes. The derivation
-keys on the repository rather than on position in `jobs.json`, so inserting or removing an entry
-never moves anybody else's tick.
-
-That is a convenience, not a safety measure. Simultaneous ticks are not a hazard worth engineering
-against: GitHub's primary quota is points per hour and does not care when they are spent, its
-secondary limits are about burst mutation rate, which `SLEEP_BETWEEN_MUTATIONS` already paces, and a
-run takes minutes, so two jobs on the same count overlap for most of their duration whatever their
-offsets. Set `offset_minutes` explicitly if you want a particular minute, not because you need to.
-
-Randomness would be worse than either. Cloud Scheduler has no jitter, so it would have to be a sleep
-inside the run: billed task time, eating into `run_deadline_seconds`. It would also widen the gap
-the absence alert has to tolerate, making a real outage slower to notice, and make the hourly tick
-count non-deterministic, which is the number the whole budget check rests on.
+That is a convenience, not a safety measure: simultaneous ticks are not a hazard worth engineering
+against, since GitHub's primary quota is points per hour regardless of when they are spent, its
+secondary limits are already paced by `SLEEP_BETWEEN_MUTATIONS`, and a run takes minutes, so two jobs
+overlap for most of their duration whatever their offsets. Randomness would be worse: Cloud Scheduler
+has no jitter, so it would have to be a sleep inside the run, eating into `run_deadline_seconds` and
+making the hourly tick count non-deterministic, which is the number the whole budget check rests on.
 
 ### Removing an entry does not remove the job
 
-The same gap from the other direction. `deploy-job.sh` only creates and updates, and nothing in CI
-deletes, so a Cloud Run job whose `jobs.json` entry is gone keeps its tick and keeps running on
-whatever image it last had, forever. It is worse than a rename, because the entry that would have
-named it is the thing that was removed: nothing in this repository points at it anymore.
-
-Delete both halves by hand, then list what is deployed and compare against `jobs.json`:
+`deploy-job.sh` only creates and updates, and nothing in CI deletes, so a Cloud Run job whose
+`jobs.json` entry is gone keeps its tick and keeps running on whatever image it last had, forever,
+with nothing in this repository pointing at it anymore. Delete both halves by hand, then list what is
+deployed and compare against `jobs.json`:
 
 ```bash
 gcloud scheduler jobs delete <name>-tick --location us-central1 --project xrplf-automation
@@ -336,126 +310,96 @@ gcloud run jobs delete <name> --region us-central1 --project xrplf-automation
 gcloud run jobs list --region us-central1 --project xrplf-automation --filter 'metadata.name ~ ^copilot-review-bot'
 ```
 
-Two things have to be right, and the first is the trap.
-
 **Never point two jobs at one repository.** The bot derives its state path from the repository it
 watches, so two jobs on one repository share the lock object, and one sits out its tick waiting for
-the other. Nothing detects that at run time, because a shared lock is indistinguishable from a slow
-predecessor. That is why `rate-budget.sh` refuses a duplicate `repo` at build time. It refuses a
-duplicate `name`, and a name without the `copilot-review-bot` prefix, for the same reason: the alert
-filters below are prefix matches on the job name, so a differently named job would tick, file real
-requests, and be invisible to every metric.
+the other, indistinguishable at run time from a slow predecessor. `rate-budget.sh` refuses a
+duplicate `repo` at build time for that reason, and refuses a duplicate `name`, or a name without the
+`copilot-review-bot` prefix, since alert filters are prefix matches on the job name.
 
-**Watch the first run.** The alert policies group by job name, so a new job is covered as soon as
-it logs anything and nothing has to be extended. Until its first `run.done` there is no time series
-to be absent, though, so that first tick is the one window nothing is watching. Confirm it, then the
-job is covered for good. See [Monitoring and alerting](#monitoring-and-alerting).
+**Watch the first run.** The alert policies group by job name, so a new job is covered as soon as it
+logs anything. Until its first `run.done` there is no time series to be absent, so that first tick is
+the one window nothing is watching; confirm it, then the job is covered for good. See [Monitoring and
+alerting](#monitoring-and-alerting).
 
 ## Rate limit budget
 
-GitHub's GraphQL quota is **5000 points per hour, per token**. Every job uses the same `gh-token`,
-so adding a repository spends the other jobs' budget.
+GitHub's GraphQL quota is **5000 points per hour, per account** (see [Why one process per
+repository](../README.md#why-one-process-per-repository)). Every job uses the same `gh-token`, so
+adding a repository spends the other jobs' budget.
 
-When the quota runs out, reads start failing part way through a run. Each one is an ERROR
+When the quota runs out, reads start failing part way through a run: each is an ERROR
 `pr.read_failed`, and after three in a row the run stops with `reason=read_failures` and leaves the
 rest for the next run. So the failure is reported rather than silent, but the repository still goes
-uninspected, and nothing about one job's own configuration reveals which job caused it.
+uninspected.
 
 The arithmetic is therefore a build step. `rate-budget.sh` sums the hourly cost of every entry in
-`jobs.json`, fails the build above the quota, and warns from 80%. It runs in `test`, before the
-image is built, so the pull request that would break the budget cannot merge.
+`jobs.json`, fails the build above the quota, and warns from 80%. It runs in `test`, before the image
+is built, so the pull request that would break the budget cannot merge.
 
-Costs were measured against `XRPLF/rippled` with `rateLimit { cost }` on the bot's own queries,
-rather than assumed:
+Per-call costs are measured against a real repository with `rateLimit { cost }` on the bot's own
+queries, since cost is not derivable from the node count:
 
-| Call                                                     | Cost                |
-|----------------------------------------------------------|---------------------|
-| `Q_REPO_PRS`, 100 PR numbers                             | 1 point             |
-| `Q_PR`, one PR in full                                   | 2 points            |
-| `{ viewer { login } }`, once per run                     | 1 point             |
-| A review request (`gh pr edit`: PR lookup plus mutation) | 3 points, estimated |
-| A reaction or error comment                              | 1 point             |
+| Call                                       | Cost              |
+| ------------------------------------------ | ----------------- |
+| `Q_REPO_PRS`, 100 PR numbers               | 1 point           |
+| `Q_PR`, one PR in full                     | 2 points          |
+| `{ viewer { login } }`, once per run       | 1 point           |
+| A review request (`requestReviewsByLogin`) | 3 points, charged |
+| A reaction or error comment                | 1 point           |
 
-The cost is not derivable from the node count: a shape with 304 nodes costs 2 and one with 1,984
-costs 1. That is why these are measured rather than computed. The review request is the one
-estimate, at the pessimistic end of a 2 to 3 range, because measuring it means filing a real review
-request.
+The review request figure is charged higher than measured, deliberately, as unmeasured headroom
+rather than a number to trim.
 
-At the declared budget of 300 PRs, one run costs `1 + 3 + 300x2 + 25x3 + 50x1 = 729` points, and
-four runs an hour is 2916. That is 58% of the quota for one repository. The model is deliberately an
-upper bound. It charges the full request cap *and* the full mention cap *and* every PR read, which
-cannot all happen in one run, because the sweep stops as soon as the request cap is reached.
+The model is a deliberate upper bound: it charges the full request cap **and** the full mention cap
+**and** every PR read in one run, which cannot all happen together, since the sweep stops as soon as
+the request cap is reached. Actual spend in an idle hour runs well below the charged figure.
 
-**Lowering `ticks_per_hour` is the lever, not raising a cap.** Halving it halves a job's hourly
-cost. Lowering `max_requests_per_run` barely helps, because almost all the cost is reads. Past that,
-the only real headroom is a second token.
+**Lowering `ticks_per_hour` is the lever, not raising a cap.** Halving it halves a job's hourly cost.
+Lowering `max_requests_per_run` barely helps, since almost all the cost is reads. Past that, the only
+real headroom is a token for a second account. Another token for the same account shares the same
+budget and adds nothing.
 
 ### When the count drifts
 
-**Count every open PR, not the ones that look eligible.** The list query asks for `states: OPEN`
-and nothing else, so a draft and a PR targeting another branch are both fetched in full and *then*
-skipped. Each costs the same 2 points as one the bot acts on. Filtering by hand before counting is
-the easy mistake: `XRPLF/xrpld-private` has 27 non-draft PRs on its base branch and 53 open in
-total, and 53 is the figure to charge for. The count the bot logs as `open_prs` on `repo.start` is
-already unfiltered, which is why that is the one to compare against.
+**Count every open PR, not the ones that look eligible.** The list query asks for `states: OPEN` and
+nothing else, so a draft or a PR targeting another branch is still fetched in full and *then*
+skipped, at the same 2 points as one the bot acts on. The count the bot logs as `open_prs` on
+`repo.start` is already unfiltered, which is why that is the figure to charge for.
 
 `expected_open_prs` is a declared figure, not a measurement, and **it constrains nothing at run
-time**: the bot reads however many open PRs there are. It decides two things only. Whether CI lets
-you merge, and, since it is now passed to the job, whether a run tells you it has gone stale.
-
-So a repository that grows does not quietly cost more than it should. It costs what it costs, and
-three things happen in order:
+time**: the bot reads however many open PRs there are. It decides two things only: whether CI lets
+you merge, and whether a run tells you it has gone stale. So a repository that grows does not quietly
+cost more than it should; it costs what it costs, and three things happen in order:
 
 1. The bot logs `repo.more_prs_than_expected` at WARNING on every run, naming both numbers and the
    gap. Your ERROR/WARNING alerting already catches this.
 2. Nothing else changes, until real spend approaches the quota.
-3. Past the quota, reads start failing part way through a run: `pr.read_failed` at ERROR, then
-   `reads.halted` with `reason=read_failures`, and a non-zero exit. Loud, and the remaining PRs are
-   left to the next run rather than dropped.
+3. Past the quota, reads start failing part way through a run, then the sweep halts with
+   `reason=read_failures` and a non-zero exit. Loud, and the remaining PRs are left to the next run
+   rather than dropped.
 
-**How much slack there is.** With the fleet as it stands, measured by running `rate-budget.sh` over
-the variants:
-
-| Event                                           | Happens at                      |
-|-------------------------------------------------|---------------------------------|
-| CI warns at 80% of quota                        | `expected_open_prs` reaches 345 |
-| CI refuses the merge                            | `expected_open_prs` reaches 470 |
-| Real spend hits the quota, if every run is busy | about 467 actual open PRs       |
-| Real spend hits the quota, if runs are idle     | about 591 actual open PRs       |
-
-The two ends differ because the model charges the full request cap **and** the full mention cap on
-every run, which cannot both happen: the sweep stops as soon as the request cap is reached. At the
-current fleet that is about 1000 points an hour charged and not spent, which is 73% on paper against
-53% in an idle hour.
-
-**Err high, but not wildly.** The two directions are not symmetric:
-
-* Declaring too high refuses a fleet that would have fitted. Immediate, visible, and it costs only
-  that you cannot add a repository until you re-check the numbers.
-* Declaring too low permits a fleet that does not fit. That costs coverage, and the symptom lands on
-  whichever job reads last rather than on the one that was mis-declared.
-
-So round up, comfortably past the observed peak, and re-check when adding a job. The number to
-compare against is the one every run logs:
+**Err high, but not wildly.** The two directions are not symmetric: declaring too high refuses a
+fleet that would have fitted, which is immediate and visible and costs nothing but a re-check.
+Declaring too low permits a fleet that does not fit, which costs coverage, and the symptom lands on
+whichever job reads last rather than on the one that was mis-declared. So round up, comfortably past
+the observed peak, and re-check when adding a job. Compare against what every run logs:
 
 ```bash
 gcloud logging read 'jsonPayload.event="repo.start"' --project xrplf-automation \
     --limit 10 --format 'value(jsonPayload.repo, jsonPayload.open_prs)'
 ```
 
-Note that the real hazard is not the drift itself, which is loud on both ends. It is **adding a
-third job on the strength of a stale total.** That decision is made from `rate-budget.sh` output,
-which reads the declared figures, so it is only as good as they are.
+The real hazard is not the drift itself, which is loud on both ends. It is **adding a third job on
+the strength of a stale total**, since that decision is made from `rate-budget.sh` output, which is
+only as good as the declared figures behind it.
 
 ## Configuration
 
 `jobs.json` is the source of truth for everything per job. `deploy-job.sh` uses `--set-env-vars`,
-which **replaces** the whole set. A variable changed by hand is corrected on the next merge, and one
-dropped from `jobs.json` returns to its default. That is deliberate: an environment variable nobody
-can find in the repository is how a job ends up running in a mode nobody chose.
-
-The consequence: to change a setting, change `jobs.json`. A `gcloud` edit lasts until the next push
-to `main`.
+which **replaces** the whole set, so a variable changed by hand is corrected on the next merge, and
+one dropped from `jobs.json` returns to its default. That is deliberate: an environment variable
+nobody can find in the repository is how a job ends up running in a mode nobody chose. To change a
+setting, change `jobs.json`. A `gcloud` edit lasts until the next push to `main`.
 
 Inspect what a job actually has with:
 
@@ -466,51 +410,43 @@ gcloud run jobs describe <job> --region us-central1 --project xrplf-automation
 ### Three job settings are fixed, not configurable
 
 `deploy-job.sh` states these on every job rather than exposing them through `jobs.json`, because the
-right value is a property of how the bot works rather than of a repository. They are stated rather
-than left to the platform default, so a value changed by hand is corrected on the next merge like
-everything else.
+right value is a property of how the bot works rather than of a repository.
 
 | Setting         | Value | Why                                                                                                                                                                                               |
-|-----------------|-------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| --------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--max-retries` | `0`   | **A failed execution is never retried.** The next tick is the retry, and it re-reads everything from GitHub, so an immediate retry would only repeat whatever just failed against the same state. |
-| `--tasks`       | `1`   | Two tasks would contend for one lock object. One would take it, the other would log `run.skipped` and exit 0, so half the work of every tick would silently not happen.                           |
+| `--tasks`       | `1`   | Two tasks would contend for one lock object; one would take it, the other would log `run.skipped` and exit 0, so half the work of every tick would silently not happen.                           |
 | `--parallelism` | `1`   | The same reason, stated on the axis Cloud Run scales.                                                                                                                                             |
 
-`--max-retries 0` is the one to remember on call. A red execution in the console stays red and
-nothing is coming to fix it. What matters is whether the *next* tick succeeded, which is what the
-absence alert on `run.done` measures.
+`--max-retries 0` is the one to remember on call: a red execution in the console stays red, and
+what matters is whether the *next* tick succeeded, which is what the absence alert on `run.done`
+measures.
 
 ### State lives in a bucket, not in `/tmp`
 
 `STATE_DIR` must be a `gs://` URL, and `deploy-job.sh` sets it to the bucket root, `gs://<bucket>`,
-with no prefix. A Cloud Run execution gets a fresh filesystem, so a local path loses the one thing
-worth keeping: the head-commit marker per PR, which is what stops a second review request in the
-window before GitHub reports the first one as pending.
+with no prefix. A Cloud Run execution gets a fresh filesystem, so a local path would lose the
+head-commit marker per PR, which is what stops a second review request in the window before GitHub
+reports the first one as pending.
 
 The bot namespaces the root itself, by the repository it watches, so every job writes to its own
-place without any job having to declare where that is:
+place without declaring where that is:
 
 ```text
 gs://xrplf-copilot-review-bot-state/<owner>/<name>/lock
 gs://xrplf-copilot-review-bot-state/<owner>/<name>/requested.json
 ```
 
-The state is not a source of truth, so losing the bucket is survivable rather than fatal. That is
+The state is not a source of truth, so losing the bucket is survivable rather than fatal, which is
 why a local `STATE_DIR` warns (`event=state.ephemeral`) rather than refusing to run. It warns on
-every run until it is fixed.
+every run until fixed.
 
-The bucket needs no credentials of its own. The bot asks the instance metadata server for a
-short-lived token for the job's service account, so the IAM granted to `bot-runtime` is what
-applies. There is no key file and nothing to rotate.
+The bucket needs no credentials of its own: the bot asks the instance metadata server for a
+short-lived token for the job's service account, so the IAM granted to `bot-runtime` is what applies.
 
-**Keep `lock_ttl_minutes` just above `task_timeout`.** Below it, a slow but healthy run gets its
-lock stolen and two runs work at once. Far above it, a killed run blocks every tick until the window
-expires. How the lock itself works is in [the bot's README](../README.md#state-and-locking).
-
-The reviewer is asked for by name, with no node id stored anywhere. `REVIEWER` overrides the target
-if gh's `@copilot` value is ever withdrawn, and nothing in production sets it. It cannot be set
-through `jobs.json`, because its value contains an `@` and `deploy-job.sh` uses `^@^` to join the
-job environment. The reasoning is in [Asking Copilot by name](../README.md#asking-copilot-by-name).
+**Keep `lock_ttl_minutes` just above `task_timeout`.** Below it, a slow but healthy run gets its lock
+stolen. Far above it, a killed run blocks every tick until the window expires. How the lock itself
+works is in [the bot's README](../README.md#state-and-locking).
 
 ## Runbook
 
@@ -522,29 +458,28 @@ in the next section have to exist or a broken bot is silent.
 
 Every event named here is defined in [What it logs](../README.md#what-it-logs), and every
 `run.fatal` reason in [the table beside it](../README.md#why-a-run-could-not-start-runfatal). The
-two `entrypoint.*` events below come from `entrypoint.sh` rather than the bot, so they are the only
-two that are not in that reference.
+two `entrypoint.*` events below come from `entrypoint.sh` rather than the bot.
 
-| Symptom                                         | Likely cause                                                                                                             | What to do                                                                                                                                                   |
-|-------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| No `run.done` for three ticks                   | A lock left behind by a killed run, or a paused tick. Both exit 0, so neither shows as a failed execution.               | Count `run.skipped`. Then check the tick with `gcloud scheduler jobs describe`.                                                                              |
-| `run.skipped` with `reason=locked`, repeatedly  | A previous run still holds the lock.                                                                                     | For a `gs://` state root the lock is broken automatically after `LOCK_TTL_MINUTES`. Wait one TTL. If it recurs, the runs are overrunning their schedule.     |
-| `repo.list_failed` or `repo.read_failed`        | The token expired, or it cannot see the repository. The `access.*` events carry the diagnosis and a `remedy` code.       | Run the three checks below.                                                                                                                                  |
-| `run.fatal` with `reason=state_bucket_unusable` | `bot-runtime` cannot write to the bucket.                                                                                | The event names the bucket, and the status code says which problem it is. 403 is a missing `roles/storage.objectAdmin`. 404 is a bucket that does not exist. |
-| `run.fatal` with `reason=no_credentials`        | The `gh-token` secret is not attached, or its latest version is empty.                                                   | Check `--set-secrets GH_TOKEN=gh-token:latest` on the job, then add a new secret version.                                                                    |
-| `reaction.failed` at `ERROR`                    | The token lacks `Issues: Read and write`.                                                                                | Grant it. See [GitHub token](#github-token). Until then the same mention is answered on every run.                                                           |
-| `requests.halted` at `ERROR`                    | Two permanent failures in a row, which is almost always repository-wide.                                                 | Check that the account still holds the Triage role and a Copilot seat.                                                                                       |
-| `repo.more_prs_than_expected`                   | The repository has outgrown its `expected_open_prs`, so the fleet is spending more than it was sized for.                | Raise the figure in `jobs.json` and re-run the budget check. See [When the count drifts](#when-the-count-drifts).                                            |
-| `state.ephemeral`                               | `STATE_DIR` is a local path, so markers are lost between executions.                                                     | Set it to the bucket root through `jobs.json`.                                                                                                               |
-| Requests are filed but no review appears        | Copilot is rate-limited or has no seat. The bot cannot tell that from a slow review.                                     | Check the PR by hand. The bot will not re-request while the request stays pending.                                                                           |
-| `entrypoint.bot_missing`                        | The image carries no executable bot at `/app/copilot-review-bot.sh`, so no run happened at all.                          | Nothing in the job can fix this. Roll back to an older digest, then work out how it passed the CI smoke test, which checks exactly this.                     |
-| `entrypoint.bad_setting`                        | `DRY_RUN` or `VERBOSE` is set to something other than `true` or `false`. Almost always a job environment edited by hand. | Correct it in `jobs.json` and merge. The entrypoint refuses rather than guessing, because `DRY_RUN=1` would otherwise read as "not a dry run".               |
-| One execution is red and nothing retried it     | Expected. The job sets `--max-retries 0`.                                                                                | Check whether the next tick succeeded. See [the fixed job settings](#three-job-settings-are-fixed-not-configurable).                                         |
+| Symptom                                         | Likely cause                                                                                                             | What to do                                                                                                                                               |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No `run.done` for three ticks                   | A lock left behind by a killed run, or a paused tick. Both exit 0, so neither shows as a failed execution.               | Count `run.skipped`. Then check the tick with `gcloud scheduler jobs describe`.                                                                          |
+| `run.skipped` with `reason=locked`, repeatedly  | A previous run still holds the lock.                                                                                     | For a `gs://` state root the lock is broken automatically after `LOCK_TTL_MINUTES`. Wait one TTL. If it recurs, the runs are overrunning their schedule. |
+| `repo.list_failed` or `repo.read_failed`        | The token expired, or it cannot see the repository. The `access.*` events carry the diagnosis and a `remedy` code.       | Run the three checks below.                                                                                                                              |
+| `run.fatal` with `reason=state_bucket_unusable` | `bot-runtime` cannot write to the bucket.                                                                                | 403 is a missing `roles/storage.objectAdmin`. 404 is a bucket that does not exist.                                                                       |
+| `run.fatal` with `reason=no_credentials`        | The `gh-token` secret is not attached, or its latest version is empty.                                                   | Check `--set-secrets GH_TOKEN=gh-token:latest` on the job, then add a new secret version.                                                                |
+| `reaction.failed` at `ERROR`                    | The token lacks `Issues: Read and write`.                                                                                | Grant it. See [GitHub token](#github-token). Until then the same mention is answered on every run.                                                       |
+| `requests.halted` at `ERROR`                    | Two permanent failures in a row, which is almost always repository-wide.                                                 | Check that the account still holds the Triage role and a Copilot seat, and that the `reviewer` on the event still resolves.                              |
+| `repo.more_prs_than_expected`                   | The repository has outgrown its `expected_open_prs`, so the fleet is spending more than it was sized for.                | Raise the figure in `jobs.json` and re-run the budget check. See [When the count drifts](#when-the-count-drifts).                                        |
+| `state.ephemeral`                               | `STATE_DIR` is a local path, so markers are lost between executions.                                                     | Set it to the bucket root through `jobs.json`.                                                                                                           |
+| Requests are filed but no review appears        | Copilot is rate-limited or has no seat. The bot cannot tell that from a slow review.                                     | Check the PR by hand. The bot will not re-request while the request stays pending.                                                                       |
+| `entrypoint.bot_missing`                        | The image carries no executable bot at `/app/copilot-review-bot.sh`, so no run happened at all.                          | Nothing in the job can fix this. Roll back to an older digest, then work out how it passed the CI smoke test, which checks exactly this.                 |
+| `entrypoint.bad_setting`                        | `DRY_RUN` or `VERBOSE` is set to something other than `true` or `false`. Almost always a job environment edited by hand. | Correct it in `jobs.json` and merge.                                                                                                                     |
+| One execution is red and nothing retried it     | Expected. The job sets `--max-retries 0`.                                                                                | Check whether the next tick succeeded. See [the fixed job settings](#three-job-settings-are-fixed-not-configurable).                                     |
 
 A token that authenticates is not the same as a token that can see the repository. Fine-grained PATs
 are deny-by-default and can only reach repositories explicitly granted to them, **public
-repositories included**. So a valid fine-grained PAT can fail on a public repository that an
-anonymous client reads without trouble. Check by hand:
+repositories included**, so a valid fine-grained PAT can fail on a public repository an anonymous
+client reads without trouble. Check by hand:
 
 ```bash
 gh api user --jq .login                      # is the token valid at all?
@@ -553,9 +488,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/repos/<owner>/<
                                              # what an anonymous client sees
 ```
 
-If the first two disagree, it is the token's resource scoping and not the repository. Reading is
-only half of it. Filing requests also needs `Pull requests: Read and write` and at least the Triage
-role.
+If the first two disagree, it is the token's resource scoping and not the repository. Filing requests
+also needs `Pull requests: Read and write` and at least the Triage role.
 
 ### Day-to-day commands
 
@@ -612,9 +546,9 @@ gcloud run jobs update <job> --region us-central1 --project xrplf-automation \
     --image us-central1-docker.pkg.dev/xrplf-automation/images/copilot-review-bot:<older-sha>
 ```
 
-**The next push to `main` undoes this.** The `deploy` job re-pins every job to the newest image, by
-design, so nothing drifts. That makes the command above an emergency stop, not a fix. To keep an old
-version running, revert the commit on `main` and let CI ship the revert.
+**The next push to `main` undoes this.** The `deploy` job re-pins every job to the newest image by
+design, so this is an emergency stop, not a fix. To keep an old version running, revert the commit on
+`main` and let CI ship the revert.
 
 If you need longer than one merge cycle, pause the tick instead:
 
@@ -628,22 +562,20 @@ catches it being left that way.
 ## Monitoring and alerting
 
 The important alert is the **absence** alert, because the worst failure modes exit 0 and never show
-up as a failed execution. A lock left behind by a killed run makes every tick a green no-op, and a
-paused tick does nothing at all. Neither produces an error to match on. What they have in common is
-that no `run.done` appears, which is the only thing that catches them.
+up as a failed execution: a lock left behind by a killed run makes every tick a green no-op, and a
+paused tick does nothing at all. What they have in common is that no `run.done` appears, which is the
+only thing that catches them.
 
-**Nothing here is per job, and it is worth knowing why.** The metric filters use
-`job_name:copilot-review-bot`, a prefix match, so a new job is covered by the metric the moment it
-logs anything. The policies then **group by `resource.label."job_name"`**, which is what makes one
-policy cover the fleet: a metric-absence condition grouped by a label is evaluated once per time
-series, so each job is judged on its own and a new one is picked up without a policy edit. Summing
-across jobs would be the mistake, because a total cannot tell "all healthy" from "one dead, one
-busy". Grouping is not summing.
+**Nothing here is per job, and it is worth knowing why.** The metric filters use a prefix match on
+`job_name:copilot-review-bot`, so a new job is covered the moment it logs anything, and the policies
+**group by `resource.label."job_name"`**, so each job is judged on its own and a new one is picked up
+without a policy edit. Summing across jobs would be the mistake, since a total cannot tell "all
+healthy" from "one dead, one busy". Grouping is not summing.
 
-One gap survives that, and it is small. An absence condition cannot fire for a time series that has
-never existed, so a job broken from its very first tick has nothing to be absent. That window runs
-from the merge to the first successful run, which is when somebody is watching anyway. After that
-the job is covered for good. The error policy has no such gap: any job's ERROR increments it.
+One gap survives that: an absence condition cannot fire for a time series that has never existed, so
+a job broken from its very first tick has nothing to be absent. That window runs from the merge to
+the first successful run, which is when somebody is watching anyway; after that the job is covered
+for good. The error policy has no such gap, since any job's ERROR increments it.
 
 ```bash
 # Dead man's switch: no successful completion in 45 minutes (three missed ticks).
@@ -678,18 +610,18 @@ gcloud logging metrics create copilot_review_bot_skipped --project xrplf-automat
 
 Then create alert policies on those metrics:
 
-| Metric                        | Policy                                             | Group by                          |
-|-------------------------------|----------------------------------------------------|-----------------------------------|
-| `copilot_review_bot_done`     | Absent for 45 minutes, which is three missed ticks | `resource.label."job_name"`       |
-| `copilot_review_bot_errors`   | Above 0                                            | `resource.label."job_name"`       |
-| `copilot_review_bot_skipped`  | More than twice in an hour, which is a wedged lock | `resource.label."job_name"`       |
-| `copilot_review_bot_requests` | No policy, on purpose                              | -                                 |
+| Metric                        | Policy                                             | Group by                    |
+| ----------------------------- | -------------------------------------------------- | --------------------------- |
+| `copilot_review_bot_done`     | Absent for 45 minutes, which is three missed ticks | `resource.label."job_name"` |
+| `copilot_review_bot_errors`   | Above 0                                            | `resource.label."job_name"` |
+| `copilot_review_bot_skipped`  | More than twice in an hour, which is a wedged lock | `resource.label."job_name"` |
+| `copilot_review_bot_requests` | No policy, on purpose                              | -                           |
 
 `copilot_review_bot_requests` has none because it is for the dashboard: "reviews stopped happening"
 is a number to look at rather than an alert that fires on a quiet afternoon.
 
-The order matters. A policy with no notification channel is inert, so create the channel first and
-keep the name it returns, because the policies reference it:
+Create the notification channel first, and keep the name it returns, because the policies reference
+it. A policy with no notification channel is inert:
 
 ```bash
 gcloud beta monitoring channels create --project xrplf-automation \
@@ -699,8 +631,7 @@ gcloud beta monitoring channels list --project xrplf-automation \
     --format 'value(name,displayName)'
 ```
 
-Then the policies. `gcloud monitoring policies create` is generally available, so no `alpha` or
-`beta` is needed for these:
+Then the policies:
 
 ```bash
 gcloud monitoring policies create --project xrplf-automation --policy-from-file=absence.json
@@ -735,15 +666,14 @@ makes one policy cover the fleet rather than one job.
 The other two are the same file with `conditionThreshold` in place of `conditionAbsent`, the same
 `groupByFields`, and these values:
 
-| Policy       | Metric                       | Comparison                              | `alignmentPeriod` | `duration` |
-|--------------|------------------------------|-----------------------------------------|-------------------|------------|
-| ERROR events | `copilot_review_bot_errors`  | `COMPARISON_GT`, `thresholdValue: 0`    | `300s`            | `0s`       |
-| Wedged lock  | `copilot_review_bot_skipped` | `COMPARISON_GT`, `thresholdValue: 2`    | `3600s`           | `0s`       |
+| Policy       | Metric                       | Comparison                           | `alignmentPeriod` | `duration` |
+| ------------ | ---------------------------- | ------------------------------------ | ----------------- | ---------- |
+| ERROR events | `copilot_review_bot_errors`  | `COMPARISON_GT`, `thresholdValue: 0` | `300s`            | `0s`       |
+| Wedged lock  | `copilot_review_bot_skipped` | `COMPARISON_GT`, `thresholdValue: 2` | `3600s`           | `0s`       |
 
 **The aligner is required, not decoration.** A log-based counter is a DELTA metric, so without
 `perSeriesAligner` the absence condition would read a gap between data points as "no runs" rather
-than waiting the full 45 minutes. `ALIGN_SUM` over `300s` is what makes the series continuous enough
-for the duration to mean what it says.
+than waiting the full duration.
 
 Confirm the grouping landed, because a policy that silently lost it looks identical until the day a
 second job dies quietly:
@@ -753,26 +683,23 @@ gcloud monitoring policies list --project xrplf-automation \
     --format 'value(displayName, conditions[0].conditionAbsent.aggregations[0].groupByFields)'
 ```
 
-**These are created by hand, and CI could do it.** It is not done, for three reasons that outweigh
-having the thresholds in git: `deployer` would need `roles/monitoring.editor` on top of the
-project-level Cloud Run role it already holds, which widens the credential CI mints; the policy
-create command is not idempotent, so it would need the same list-then-create-or-update dance as
-[`deploy-job.sh`](deploy-job.sh); and a policy is useless without a notification channel, which is
-account-level configuration rather than anything this repository should own. Grouping by job name
-removes the reason automation looked necessary, which was keeping up with new jobs.
+**These are created by hand, not by CI.** Automating it would need `deployer` to hold
+`roles/monitoring.editor` on top of the project-level Cloud Run role it already has, and the policy
+create command is not idempotent, so it would need the same reconcile logic as `deploy-job.sh` for
+comparatively little gain, since grouping by job name is what already keeps new jobs covered without
+a policy edit.
 
 ## Set it up from scratch
 
-Eight steps, in order. Everything here already exists for the repositories listed in
+Eight steps, in order. Everything here already exists for the repositories in
 [`jobs.json`](jobs.json), so the whole list is the path for a **new organization or a new GCP
-project**.
+project**. Adding a repository to the existing setup is steps 3 and 7 only, plus step 4 if the token
+is a fine-grained PAT, since that kind has to be granted each repository explicitly. Step 8 is not on
+that list: the alert policies group by job name, so they cover a new job without an edit.
 
-Adding a repository to the existing setup is steps 3, 7 and 8 only, plus step 4 if the token is a
-fine-grained PAT, because that kind has to be granted each repository explicitly.
-
-The two halves are independent until step 5. The GitHub half decides what the bot may do, and the
-GCP half decides what may run it. Neither half is any use alone, and two of the eight steps are not
-automated at all.
+The two halves are independent until step 5: the GitHub half decides what the bot may do, and the GCP
+half decides what may run it. Only step 7 is automated, and step 5 is scripted but run by hand. The
+other six are manual.
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 18, 'rankSpacing': 34}, 'themeVariables': {'fontSize': '13px'}}}%%
@@ -793,7 +720,7 @@ flowchart LR
 ```
 
 | Step | Do                                                                                          | Automated | Detail                                                                    |
-|------|---------------------------------------------------------------------------------------------|-----------|---------------------------------------------------------------------------|
+| ---- | ------------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------- |
 | 1    | Create the bot account, such as `@xrplf-bot`. One account serves every watched repository.  | no        | [Why the bot exists](../README.md#why-the-bot-exists)                     |
 | 2    | Give that account a Copilot license or seat. Without one, requests are filed and ignored.   | no        | [GitHub token](#github-token)                                             |
 | 3    | Grant the account at least the **Triage** role on each watched repository.                  | no        | [GitHub token](#github-token)                                             |
@@ -803,18 +730,17 @@ flowchart LR
 | 7    | Add a `jobs.json` entry and merge. CI creates the Cloud Run job and its tick.               | yes       | [Add or change a watched repository](#add-or-change-a-watched-repository) |
 | 8    | Create the log metrics and alert policies, once. Grouped by job name, they cover every job. | no        | [Monitoring and alerting](#monitoring-and-alerting)                       |
 
-Steps 2 and 3 are the two that fail silently if they are missed. A missing Copilot seat means every
-request succeeds and no review ever arrives. A missing Triage role means every request returns 403.
+Steps 2 and 3 are the two that fail silently if missed: a missing Copilot seat means every request
+succeeds and no review ever arrives, and a missing Triage role means every request is refused.
 Neither is visible from the bot's own configuration, so confirm both before blaming anything else.
 
-Step 6 is not optional and it is not about convenience. The workload identity pool's attribute
-condition says "this repository, this branch". It does not say "only through review". The ruleset is
-the other half, and [GitHub Actions](#github-actions) explains why neither alone is enough.
+Step 6 is not optional. The workload identity pool's attribute condition says "this repository, this
+branch", not "only through review"; the ruleset is the other half.
 
 ## First-time provisioning: the GCP commands
 
-This is step 5 above. Everything below already exists in `xrplf-automation`. It is recorded here so
-the setup is reproducible.
+This is step 5 above, already applied in `xrplf-automation`. Recorded here so the setup is
+reproducible.
 
 ```bash
 PROJECT=xrplf-automation
@@ -923,8 +849,7 @@ gcloud iam service-accounts add-iam-policy-binding \
     --role roles/iam.workloadIdentityUser
 ```
 
-The first Cloud Run job and its tick are **not** created here. Merging a `jobs.json` entry does
-that.
+The first Cloud Run job and its tick are **not** created here. Merging a `jobs.json` entry does that.
 
 ### Verifying the OIDC trust
 
@@ -942,12 +867,12 @@ gcloud iam workload-identity-pools providers describe github-oidc \
 An empty result means the provider trusts every GitHub tenant, and the only remaining gate is the
 `ship` job's own `if:`, which lives in a file that anyone with write access can edit.
 
-**The `sub` claim is not the shape the GitHub documentation shows.** On this repository it carries
-numeric ids (`repo:XRPLF@67929741/ai-automation@1349468746:ref:refs/heads/main`), not the documented
-`repo:OWNER/NAME:ref:...`. Nothing here depends on it, because the condition and the binding both
-use the separate `assertion.repository` and `assertion.ref` claims. Do not rewrite either one to
-bind `principal://` on `google.subject` using the documented pattern. It would not match, and the
-failure looks like a permissions problem rather than a format mismatch.
+**The `sub` claim does not have the shape the GitHub documentation shows**; on this project it
+carries numeric ids rather than the documented `repo:OWNER/NAME:ref:...` form. Nothing here depends
+on it, since the condition and the binding both use the separate `assertion.repository` and
+`assertion.ref` claims. Do not rewrite either one to bind `principal://` on `google.subject` using the
+documented pattern: it would not match, and the failure looks like a permissions problem rather than
+a format mismatch.
 
 ## Related documents
 
